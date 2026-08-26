@@ -26,6 +26,7 @@ async function projectContext(cwd: string): Promise<string> {
 
 export interface SystemPromptOptions {
   cwd: string;
+  allowedRoots?: string[];
   tools: ToolDefinition[];
 }
 
@@ -64,7 +65,9 @@ Operating guidelines:
 
 - Inspect relevant files before making claims or edits.
 - Prefer requesting read, grep, find, and ls for exploration; request bash only when a dedicated operation is insufficient.
-- Use paths relative to the current working directory.
+- Use paths relative to the current working directory. Absolute paths are accepted only within a controller-granted root.
+- Use pwd to inspect the current directory and granted roots. Use cd to change the persistent working directory before exploring another granted project. A shell command's internal cd does not persist into later operations.
+- After changing projects, inspect applicable AGENTS.md or CLAUDE.md files before modifying anything.
 - Preserve existing user changes and keep edits narrowly scoped.
 - For edit, copy old_text exactly from read output and make one focused replacement.
 - After changes, run proportionate verification when possible.
@@ -79,6 +82,7 @@ Operating guidelines:
     context ? `<project_context>\n${context}\n</project_context>` : undefined,
     `Current date: ${new Date().toISOString().slice(0, 10)}`,
     `Current working directory: ${options.cwd}`,
+    `Controller-granted roots:\n${[options.cwd, ...(options.allowedRoots ?? [])].map((root) => `- ${root}`).join("\n")}`,
   ]
     .filter((part): part is string => Boolean(part))
     .join("\n\n");

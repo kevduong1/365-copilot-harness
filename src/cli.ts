@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { createInterface, type Interface } from "node:readline/promises";
 import { stdin, stdout, stderr } from "node:process";
+import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { CodingAgent } from "./agent/runner.js";
 import type { AgentEvent, ToolCall, ToolDefinition } from "./agent/types.js";
@@ -8,31 +9,86 @@ import { CopilotClient } from "./client.js";
 import { ResponseTimeoutError } from "./errors.js";
 
 interface CliOptions {
-  command: "login" | "interactive" | "print";
+  command: "help" | "login" | "interactive" | "print";
   task: string;
   autoApprove: boolean;
   readOnly: boolean;
   rawChat: boolean;
+  cwd: string;
+  allowedRoots: string[];
 }
 
 function parseArgs(args: string[]): CliOptions {
-  if (args[0] === "login") {
-    return { command: "login", task: "", autoApprove: false, readOnly: false, rawChat: false };
+  if (args[0] === "login" || args[0] === "--help" || args[0] === "-h") {
+    return {
+      command: args[0] === "login" ? "login" : "help",
+      task: "",
+      autoApprove: false,
+      readOnly: false,
+      rawChat: false,
+      cwd: process.cwd(),
+      allowedRoots: [],
+    };
   }
 
-  const printIndex = args.findIndex((arg) => arg === "--print" || arg === "-p");
-  const flags = new Set(args.filter((arg) => arg.startsWith("-")));
-  const task =
-    printIndex >= 0
-      ? args.slice(printIndex + 1).filter((arg) => !arg.startsWith("--")).join(" ")
-      : "";
+  let printMode = false;
+  let autoApprove = false;
+  let readOnly = false;
+  let rawChat = false;
+  let cwd = process.cwd();
+  const allowedRoots: string[] = [];
+  const taskParts: string[] = [];
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index]!;
+    if (arg === "--print" || arg === "-p") printMode = true;
+    else if (arg === "--yes" || arg === "-y") autoApprove = true;
+    else if (arg === "--read-only") readOnly = true;
+    else if (arg === "--chat") rawChat = true;
+    else if (arg === "--cwd" || arg === "--add-dir" || arg === "--allow-dir") {
+      const value = args[index + 1];
+      if (value === undefined || value.startsWith("-")) throw new Error(`${arg} requires a directory`);
+      index += 1;
+      if (arg === "--cwd") cwd = resolve(value);
+      else allowedRoots.push(resolve(value));
+    } else if (arg === "--") {
+      taskParts.push(...args.slice(index + 1));
+      break;
+    } else if (arg.startsWith("-")) {
+      throw new Error(`Unknown option: ${arg}`);
+    } else if (printMode) {
+      taskParts.push(arg);
+    } else {
+      throw new Error(`Unexpected argument: ${arg}`);
+    }
+  }
+
   return {
-    command: printIndex >= 0 ? "print" : "interactive",
-    task,
-    autoApprove: flags.has("--yes") || flags.has("-y"),
-    readOnly: flags.has("--read-only"),
-    rawChat: flags.has("--chat"),
+    command: printMode ? "print" : "interactive",
+    task: taskParts.join(" "),
+    autoApprove,
+    readOnly,
+    rawChat,
+    cwd,
+    allowedRoots,
   };
+}
+
+function printHelp(): void {
+  console.log(`Usage:
+  pnpm cli login
+  pnpm cli [--cwd DIR] [--add-dir DIR ...] [--read-only] [--yes]
+  pnpm cli [options] --print "TASK"
+
+Options:
+  --cwd DIR       Start the coding agent in DIR; DIR becomes an allowed root
+  --add-dir DIR   Grant access to an additional root and its descendants (repeatable)
+  --allow-dir DIR Alias for --add-dir
+  --read-only     Disable edit, write, and bash
+  --yes, -y       Automatically approve mutating tools
+  --chat          Use raw browser chat instead of the coding agent
+  --print, -p     Run one task non-interactively
+  --help, -h      Show this help`);
 }
 
 async function login(): Promise<void> {
@@ -98,7 +154,8 @@ async function interactive(options: CliOptions): Promise<void> {
   let closing = false;
   let agentMode = !options.rawChat;
   const agent = new CodingAgent(client, {
-    cwd: process.cwd(),
+    cwd: options.cwd,
+    allowedRoots: options.allowedRoots,
     readOnly: options.readOnly,
     confirmTool: approvalPrompt(readline, options.autoApprove),
     onEvent: eventPrinter(stdout),
@@ -116,6 +173,10 @@ async function interactive(options: CliOptions): Promise<void> {
   console.log(
     `M365 Copilot coding harness (${agentMode ? "agent" : "chat"} mode${options.readOnly ? ", read-only" : ""}).`,
   );
+  console.log(`Working directory: ${options.cwd}`);
+  if (options.allowedRoots.length > 0) {
+    console.log(`Additional allowed roots: ${options.allowedRoots.join(", ")}`);
+  }
   console.log("Commands: /agent, /chat, /tools, /new, /help, /quit");
 
   try {
@@ -193,7 +254,8 @@ async function print(options: CliOptions): Promise<void> {
     return;
   }
   const agent = new CodingAgent(client, {
-    cwd: process.cwd(),
+    cwd: options.cwd,
+    allowedRoots: options.allowedRoots,
     readOnly: options.readOnly,
     confirmTool: async () => options.autoApprove,
     onEvent: eventPrinter(stderr),
@@ -207,7 +269,8 @@ async function print(options: CliOptions): Promise<void> {
 
 export async function main(args = process.argv.slice(2)): Promise<void> {
   const options = parseArgs(args);
-  if (options.command === "login") await login();
+  if (options.command === "help") printHelp();
+  else if (options.command === "login") await login();
   else if (options.command === "print") await print(options);
   else await interactive(options);
 }

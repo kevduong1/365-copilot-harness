@@ -80,18 +80,44 @@ async function runProcess(
   });
 }
 
-class WorkspacePaths {
-  private constructor(readonly root: string) {}
+export interface WorkspaceToolOptions {
+  allowedRoots?: string[];
+}
 
-  static async create(cwd: string): Promise<WorkspacePaths> {
-    return new WorkspacePaths(await realpath(cwd));
+class WorkspacePaths {
+  private currentDirectory: string;
+
+  private constructor(
+    cwd: string,
+    readonly roots: string[],
+    private readonly validationRoots: string[],
+  ) {
+    this.currentDirectory = cwd;
+  }
+
+  static async create(cwd: string, allowedRoots: string[] = []): Promise<WorkspacePaths> {
+    const requestedRoots = [cwd, ...allowedRoots].map((root) => resolve(root));
+    const resolvedRequestedRoots = await Promise.all(
+      requestedRoots.map((root) => realpath(root)),
+    );
+    const resolvedCwd = resolvedRequestedRoots[0]!;
+    const resolvedRoots = resolvedRequestedRoots;
+    for (const root of resolvedRoots) {
+      if (!(await stat(root)).isDirectory()) throw new Error(`Allowed root is not a directory: ${root}`);
+    }
+    const uniqueRoots = [...new Set(resolvedRoots)];
+    const validationRoots = [...new Set([...requestedRoots, ...resolvedRoots])];
+    return new WorkspacePaths(resolvedCwd, uniqueRoots, validationRoots);
+  }
+
+  get cwd(): string {
+    return this.currentDirectory;
   }
 
   lexical(path: string): string {
     const normalized = path.startsWith("@") ? path.slice(1) : path;
-    const candidate = resolve(this.root, normalized || ".");
-    const fromRoot = relative(this.root, candidate);
-    if (fromRoot === ".." || fromRoot.startsWith(`..${sep}`) || isAbsolute(fromRoot)) {
+    const candidate = resolve(this.currentDirectory, normalized || ".");
+    if (!this.isInsideAllowedRoot(candidate)) {
       throw new Error(`Path escapes the workspace: ${path}`);
     }
     return candidate;
@@ -132,21 +158,64 @@ class WorkspacePaths {
   }
 
   display(path: string): string {
-    return relative(this.root, path) || ".";
+    const fromCurrent = relative(this.currentDirectory, path);
+    if (fromCurrent !== ".." && !fromCurrent.startsWith(`..${sep}`) && !isAbsolute(fromCurrent)) {
+      return fromCurrent || ".";
+    }
+    return path;
+  }
+
+  async changeDirectory(path: string): Promise<string> {
+    const next = await this.existing(path);
+    const info = await stat(next);
+    if (!info.isDirectory()) throw new Error(`${this.display(next)} is not a directory`);
+    this.currentDirectory = next;
+    return next;
   }
 
   private assertResolvedInside(resolvedPath: string, requestedPath: string): void {
-    const fromRoot = relative(this.root, resolvedPath);
-    if (fromRoot === ".." || fromRoot.startsWith(`..${sep}`) || isAbsolute(fromRoot)) {
+    if (!this.isInsideAllowedRoot(resolvedPath)) {
       throw new Error(`Path resolves outside the workspace: ${requestedPath}`);
     }
   }
+
+  private isInsideAllowedRoot(path: string): boolean {
+    return this.validationRoots.some((root) => {
+      const fromRoot = relative(root, path);
+      return fromRoot !== ".." && !fromRoot.startsWith(`..${sep}`) && !isAbsolute(fromRoot);
+    });
+  }
 }
 
-export async function createWorkspaceTools(cwd: string): Promise<ToolDefinition[]> {
-  const workspace = await WorkspacePaths.create(cwd);
+export async function createWorkspaceTools(
+  cwd: string,
+  options: WorkspaceToolOptions = {},
+): Promise<ToolDefinition[]> {
+  const workspace = await WorkspacePaths.create(cwd, options.allowedRoots);
 
   const tools: ToolDefinition[] = [
+    {
+      name: "pwd",
+      description: "Show the controller's current working directory and every filesystem root granted to this session.",
+      parameters: "{}",
+      mutates: false,
+      execute: async () =>
+        [
+          `Current working directory: ${workspace.cwd}`,
+          "Allowed roots:",
+          ...workspace.roots.map((root) => `- ${root}`),
+        ].join("\n"),
+    },
+    {
+      name: "cd",
+      description: "Change the persistent working directory for subsequent controller operations. The destination must be inside an allowed root.",
+      parameters: '{"path":"/absolute/or/relative/directory"}',
+      mutates: false,
+      execute: async (args) => {
+        const next = await workspace.changeDirectory(stringArg(args, "path"));
+        return `Current working directory: ${next}`;
+      },
+    },
     {
       name: "read",
       description: "Read a UTF-8 text file with numbered lines. Use offset and limit for large files.",
@@ -182,11 +251,14 @@ export async function createWorkspaceTools(cwd: string): Promise<ToolDefinition[
           commandArgs.push("--glob", glob);
         }
         commandArgs.push("--", pattern, path);
-        const result = await runProcess("rg", commandArgs, workspace.root);
+        const result = await runProcess("rg", commandArgs, workspace.cwd);
         if (result.exitCode > 1) throw new Error(result.stderr || `rg exited ${result.exitCode}`);
         const lines = result.stdout.trimEnd().split("\n").filter(Boolean);
         if (lines.length === 0) return "No matches";
-        const shown = lines.slice(0, maxResults).map((line) => line.replace(`${workspace.root}${sep}`, ""));
+        const shown = lines.slice(0, maxResults).map((line) => {
+          const absolute = isAbsolute(line) ? line : resolve(workspace.cwd, line);
+          return workspace.display(absolute);
+        });
         if (lines.length > shown.length) shown.push(`… ${lines.length - shown.length} more matches`);
         return shown.join("\n");
       },
@@ -207,13 +279,13 @@ export async function createWorkspaceTools(cwd: string): Promise<ToolDefinition[
           commandArgs.push("--glob", glob);
         }
         commandArgs.push(path);
-        const result = await runProcess("rg", commandArgs, workspace.root);
+        const result = await runProcess("rg", commandArgs, workspace.cwd);
         if (result.exitCode > 1) throw new Error(result.stderr || `rg exited ${result.exitCode}`);
         const files = result.stdout
           .trimEnd()
           .split("\n")
           .filter(Boolean)
-          .map((file) => file.replace(`${workspace.root}${sep}`, ""));
+          .map((file) => workspace.display(isAbsolute(file) ? file : resolve(workspace.cwd, file)));
         if (files.length === 0) return "No files found";
         const shown = files.slice(0, maxResults);
         if (files.length > shown.length) shown.push(`… ${files.length - shown.length} more files`);
@@ -281,7 +353,7 @@ export async function createWorkspaceTools(cwd: string): Promise<ToolDefinition[
       execute: async (args) => {
         const command = stringArg(args, "command");
         const timeoutMs = numberArg(args, "timeout_ms", 30_000, 100, 300_000);
-        const result = await runProcess("/bin/zsh", ["-lc", command], workspace.root, timeoutMs);
+        const result = await runProcess("/bin/zsh", ["-lc", command], workspace.cwd, timeoutMs);
         const sections = [
           `exit_code: ${result.exitCode}`,
           result.stdout ? `stdout:\n${result.stdout}` : "",

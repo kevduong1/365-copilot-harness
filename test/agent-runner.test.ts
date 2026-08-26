@@ -122,3 +122,26 @@ test("CodingAgent reset does not open the new chat twice", async () => {
   assert.equal(await agent.run("Continue in the reset chat"), "Reset task complete.");
   assert.equal(backend.newChats, 1);
 });
+
+test("CodingAgent advertises persistent directory tools and granted roots", async () => {
+  const backend = new ScriptedBackend(["HARNESS_READY", "Done."]);
+  const tools: ToolDefinition[] = [
+    {
+      name: "cd",
+      description: "change directory",
+      parameters: '{"path":"directory"}',
+      mutates: false,
+      execute: async () => "changed",
+    },
+  ];
+  const agent = new CodingAgent(backend, {
+    cwd: "/workspace/one",
+    allowedRoots: ["/workspace/two"],
+    tools,
+  });
+
+  await agent.run("Inspect another project");
+  assert.match(backend.prompts[0] ?? "", /Use pwd/);
+  assert.match(backend.prompts[0] ?? "", /Use cd to change the persistent working directory/);
+  assert.match(backend.prompts[0] ?? "", /\/workspace\/two/);
+});

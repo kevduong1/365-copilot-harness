@@ -9,7 +9,7 @@ export {
 export { extractMarkdown } from "./extract.js";
 export { CodingAgent, type AgentRunnerOptions } from "./agent/runner.js";
 export { buildAgentSystemPrompt, type SystemPromptOptions } from "./agent/system-prompt.js";
-export { createWorkspaceTools } from "./agent/tools.js";
+export { createWorkspaceTools, type WorkspaceToolOptions } from "./agent/tools.js";
 export type {
   AgentBackend,
   AgentEvent,

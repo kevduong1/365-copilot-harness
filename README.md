@@ -40,7 +40,22 @@ pnpm cli
 
 Agent mode is the default. The harness starts a fresh Copilot conversation, injects a coding-specific system prompt, detects structured tool calls, executes them locally, returns the results to Copilot, and repeats until Copilot gives a final answer.
 
-Built-in tools are `read`, `grep`, `find`, `ls`, `edit`, `write`, and `bash`. File tools are restricted to the current working directory, including symlink resolution. `edit`, `write`, and `bash` require interactive approval by default.
+Built-in tools are `pwd`, `cd`, `read`, `grep`, `find`, `ls`, `edit`, `write`, and `bash`. `cd` changes the controller's working directory persistently, so later file and shell operations run from the selected project. File tools are restricted to explicitly granted roots, including symlink resolution. `edit`, `write`, and `bash` require interactive approval by default.
+
+Start directly in another repository:
+
+```sh
+pnpm cli --cwd /Users/kevin/repos/ai/.talos-worktrees/atc-gan/test
+```
+
+To let one session move between this repository and other projects, grant one or more additional roots. The coding agent can then call `cd` itself:
+
+```sh
+pnpm cli --add-dir /Users/kevin/repos/ai
+pnpm cli --add-dir /Users/kevin/repos/ai --add-dir /Users/kevin/repos/another-project
+```
+
+An additional grant includes its descendants. Without `--add-dir`, attempts to read paths outside `--cwd` (or the launch directory) remain blocked. Prefer granting the narrowest directory that covers the task.
 
 Useful commands:
 
@@ -112,7 +127,11 @@ import { CodingAgent } from "./src/index.js";
 
 const client = await CopilotClient.launch();
 try {
-  const agent = new CodingAgent(client, { cwd: process.cwd(), readOnly: true });
+  const agent = new CodingAgent(client, {
+    cwd: process.cwd(),
+    allowedRoots: ["/Users/kevin/repos/ai"],
+    readOnly: true,
+  });
   const answer = await agent.run("Inspect this repository and summarize its architecture");
   console.log(answer);
 } finally {

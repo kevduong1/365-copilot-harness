@@ -12,6 +12,7 @@ import type {
 
 export interface AgentRunnerOptions {
   cwd?: string;
+  allowedRoots?: string[];
   maxSteps?: number;
   readOnly?: boolean;
   confirmTool?: ConfirmTool;
@@ -22,6 +23,7 @@ export interface AgentRunnerOptions {
 export class CodingAgent {
   private readonly cwd: string;
   private readonly maxSteps: number;
+  private readonly allowedRoots: string[];
   private readonly readOnly: boolean;
   private readonly confirmTool: ConfirmTool | undefined;
   private readonly onEvent: ((event: AgentEvent) => Promise<void> | void) | undefined;
@@ -34,6 +36,7 @@ export class CodingAgent {
     options: AgentRunnerOptions = {},
   ) {
     this.cwd = options.cwd ?? process.cwd();
+    this.allowedRoots = options.allowedRoots ?? [];
     this.maxSteps = options.maxSteps ?? 16;
     this.readOnly = options.readOnly ?? false;
     this.confirmTool = options.confirmTool;
@@ -55,7 +58,11 @@ export class CodingAgent {
     if (!this.initialized) {
       if (!this.newChatPrepared) await this.backend.newChat();
       this.newChatPrepared = false;
-      const systemPrompt = await buildAgentSystemPrompt({ cwd: this.cwd, tools });
+      const systemPrompt = await buildAgentSystemPrompt({
+        cwd: this.cwd,
+        allowedRoots: this.allowedRoots,
+        tools,
+      });
       const acknowledgement = await this.backend.sendAndWait(
         `<coding_harness_system>\n${systemPrompt}\n</coding_harness_system>\n\nThe local coding harness is now active. Reply with exactly HARNESS_READY and nothing else.`,
       );
@@ -117,7 +124,7 @@ export class CodingAgent {
   }
 
   private async availableTools(): Promise<ToolDefinition[]> {
-    this.tools ??= await createWorkspaceTools(this.cwd);
+    this.tools ??= await createWorkspaceTools(this.cwd, { allowedRoots: this.allowedRoots });
     return this.readOnly ? this.tools.filter((tool) => !tool.mutates) : this.tools;
   }
 

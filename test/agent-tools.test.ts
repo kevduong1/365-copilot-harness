@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -27,6 +27,44 @@ test("workspace tools reject paths outside the root", async (t) => {
   assert.ok(read);
 
   await assert.rejects(read.execute({ path: "../outside.txt" }), /escapes the workspace/);
+});
+
+test("additional roots and cd provide persistent access to another project", async (t) => {
+  const parent = await mkdtemp(join(tmpdir(), "copilot-tools-"));
+  t.after(() => rm(parent, { recursive: true, force: true }));
+  const first = join(parent, "first");
+  const second = join(parent, "second");
+  await mkdir(first);
+  await mkdir(join(second, "src"), { recursive: true });
+  await writeFile(join(second, "src", "other.ts"), "export const elsewhere = true;\n");
+
+  const tools = await createWorkspaceTools(first, { allowedRoots: [second] });
+  const pwd = tools.find((tool) => tool.name === "pwd");
+  const cd = tools.find((tool) => tool.name === "cd");
+  const read = tools.find((tool) => tool.name === "read");
+  const grep = tools.find((tool) => tool.name === "grep");
+  assert.ok(pwd && cd && read && grep);
+
+  assert.match(await pwd.execute({}), new RegExp(second.replaceAll("/", "\\/")));
+  assert.match(await cd.execute({ path: second }), /Current working directory: .*\/second$/);
+  assert.match(await read.execute({ path: "src/other.ts" }), /elsewhere = true/);
+  assert.match(await grep.execute({ pattern: "elsewhere", path: "." }), /src\/other\.ts:1:/);
+});
+
+test("cd rejects an ungranted directory and symlinks outside granted roots", async (t) => {
+  const parent = await mkdtemp(join(tmpdir(), "copilot-tools-"));
+  t.after(() => rm(parent, { recursive: true, force: true }));
+  const root = join(parent, "root");
+  const outside = join(parent, "outside");
+  await mkdir(root);
+  await mkdir(outside);
+  await symlink(outside, join(root, "escape"));
+  const tools = await createWorkspaceTools(root);
+  const cd = tools.find((tool) => tool.name === "cd");
+  assert.ok(cd);
+
+  await assert.rejects(cd.execute({ path: outside }), /escapes the workspace/);
+  await assert.rejects(cd.execute({ path: "escape" }), /resolves outside the workspace/);
 });
 
 test("edit requires a unique match", async (t) => {
