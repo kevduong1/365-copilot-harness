@@ -12,6 +12,53 @@ function stringArg(args: Record<string, unknown>, name: string, fallback?: strin
   return value;
 }
 
+function aliasedStringArg(args: Record<string, unknown>, names: string[]): string {
+  const supplied = names.filter((name) => args[name] !== undefined);
+  if (supplied.length === 0) throw new Error(`${names[0]} must be a string`);
+  const values = supplied.map((name) => stringArg(args, name));
+  if (new Set(values).size > 1) {
+    throw new Error(`Conflicting values supplied for ${supplied.join(" and ")}`);
+  }
+  return values[0]!;
+}
+
+function aliasedIntegerArg(
+  args: Record<string, unknown>,
+  names: string[],
+  fallback?: number,
+): number {
+  const supplied = names.filter((name) => args[name] !== undefined);
+  if (supplied.length === 0) {
+    if (fallback !== undefined) return fallback;
+    throw new Error(`${names[0]} must be a positive integer`);
+  }
+  const values = supplied.map((name) => args[name]);
+  if (new Set(values).size > 1) {
+    throw new Error(`Conflicting values supplied for ${supplied.join(" and ")}`);
+  }
+  const value = values[0];
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1) {
+    throw new Error(`${supplied[0]} must be a positive integer`);
+  }
+  return value;
+}
+
+function aliasedBooleanArg(
+  args: Record<string, unknown>,
+  names: string[],
+  fallback: boolean,
+): boolean {
+  const supplied = names.filter((name) => args[name] !== undefined);
+  if (supplied.length === 0) return fallback;
+  const values = supplied.map((name) => args[name]);
+  if (new Set(values).size > 1) {
+    throw new Error(`Conflicting values supplied for ${supplied.join(" and ")}`);
+  }
+  const value = values[0];
+  if (typeof value !== "boolean") throw new Error(`${supplied[0]} must be a boolean`);
+  return value;
+}
+
 function numberArg(
   args: Record<string, unknown>,
   name: string,
@@ -314,22 +361,60 @@ export async function createWorkspaceTools(
     },
     {
       name: "edit",
-      description: "Replace exactly one occurrence of old_text in an existing UTF-8 file.",
-      parameters: '{"path":"src/file.ts","old_text":"exact text","new_text":"replacement"}',
+      description: "Edit an existing UTF-8 file using either an exact text replacement or an inclusive line range from numbered read output. Exact mode is unique by default; set replace_all only intentionally.",
+      parameters: 'exact: {"path":"src/file.ts","old_text":"exact text","new_text":"replacement","replace_all":false}; line range: {"path":"src/file.ts","start_line":10,"end_line":12,"new_text":"replacement lines"}',
       mutates: true,
       execute: async (args) => {
         const path = await workspace.existing(stringArg(args, "path"));
-        const oldText = stringArg(args, "old_text");
-        const newText = stringArg(args, "new_text");
-        if (oldText.length === 0) throw new Error("old_text must not be empty");
         const content = await readFile(path, "utf8");
+        const newText = aliasedStringArg(args, ["new_text", "newText", "new_string", "newString"]);
+        const hasRange =
+          args.start_line !== undefined ||
+          args.startLine !== undefined ||
+          args.end_line !== undefined ||
+          args.endLine !== undefined;
+        const hasExact =
+          args.old_text !== undefined ||
+          args.oldText !== undefined ||
+          args.old_string !== undefined ||
+          args.oldString !== undefined;
+
+        if (hasRange && hasExact) {
+          throw new Error("Use either old_text exact replacement or start_line/end_line, not both");
+        }
+
+        if (hasRange) {
+          const startLine = aliasedIntegerArg(args, ["start_line", "startLine"]);
+          const endLine = aliasedIntegerArg(args, ["end_line", "endLine"], startLine);
+          if (endLine < startLine) throw new Error("end_line must be greater than or equal to start_line");
+          const lines = content.split("\n");
+          if (endLine > lines.length) {
+            throw new Error(`Line range ${startLine}-${endLine} exceeds the ${lines.length}-line file`);
+          }
+          const replacementLines =
+            newText.length === 0 ? [] : newText.replace(/\n$/, "").split("\n");
+          lines.splice(startLine - 1, endLine - startLine + 1, ...replacementLines);
+          await writeFile(path, lines.join("\n"), "utf8");
+          return `Updated ${workspace.display(path)} lines ${startLine}-${endLine}`;
+        }
+
+        if (!hasExact) {
+          throw new Error("edit requires either old_text or start_line/end_line");
+        }
+        const oldText = aliasedStringArg(args, ["old_text", "oldText", "old_string", "oldString"]);
+        const replaceAll = aliasedBooleanArg(args, ["replace_all", "replaceAll"], false);
+        if (oldText.length === 0) throw new Error("old_text must not be empty");
         const first = content.indexOf(oldText);
         if (first < 0) throw new Error("old_text was not found");
-        if (content.indexOf(oldText, first + oldText.length) >= 0) {
+        const occurrences = content.split(oldText).length - 1;
+        if (!replaceAll && occurrences > 1) {
           throw new Error("old_text occurs more than once; include more surrounding context");
         }
-        await writeFile(path, `${content.slice(0, first)}${newText}${content.slice(first + oldText.length)}`, "utf8");
-        return `Updated ${workspace.display(path)}`;
+        const updated = replaceAll
+          ? content.split(oldText).join(newText)
+          : `${content.slice(0, first)}${newText}${content.slice(first + oldText.length)}`;
+        await writeFile(path, updated, "utf8");
+        return `Updated ${workspace.display(path)} (${replaceAll ? occurrences : 1} replacement${replaceAll && occurrences !== 1 ? "s" : ""})`;
       },
     },
     {

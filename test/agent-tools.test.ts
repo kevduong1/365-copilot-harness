@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -79,4 +79,62 @@ test("edit requires a unique match", async (t) => {
     edit.execute({ path: "duplicate.txt", old_text: "same", new_text: "different" }),
     /more than once/,
   );
+});
+
+test("edit supports line ranges from numbered read output", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "copilot-tools-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const path = join(root, "lines.txt");
+  await writeFile(path, "one\ntwo\nthree\nfour\n");
+  const tools = await createWorkspaceTools(root);
+  const edit = tools.find((tool) => tool.name === "edit");
+  assert.ok(edit);
+
+  assert.match(
+    await edit.execute({
+      path: "lines.txt",
+      start_line: 2,
+      end_line: 3,
+      new_text: "replacement\nlines",
+    }),
+    /lines 2-3/,
+  );
+  assert.equal(await readFile(path, "utf8"), "one\nreplacement\nlines\nfour\n");
+});
+
+test("edit accepts common aliases and intentional replace-all", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "copilot-tools-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const path = join(root, "aliases.txt");
+  await writeFile(path, "old old old\n");
+  const tools = await createWorkspaceTools(root);
+  const edit = tools.find((tool) => tool.name === "edit");
+  assert.ok(edit);
+
+  assert.match(
+    await edit.execute({
+      path: "aliases.txt",
+      oldString: "old",
+      newString: "new",
+      replaceAll: true,
+    }),
+    /3 replacements/,
+  );
+  assert.equal(await readFile(path, "utf8"), "new new new\n");
+});
+
+test("invalid line edits leave the file unchanged", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "copilot-tools-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const path = join(root, "unchanged.txt");
+  await writeFile(path, "one\ntwo\n");
+  const tools = await createWorkspaceTools(root);
+  const edit = tools.find((tool) => tool.name === "edit");
+  assert.ok(edit);
+
+  await assert.rejects(
+    edit.execute({ path: "unchanged.txt", startLine: 5, newText: "bad" }),
+    /exceeds/,
+  );
+  assert.equal(await readFile(path, "utf8"), "one\ntwo\n");
 });
