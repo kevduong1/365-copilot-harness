@@ -17,8 +17,11 @@ export const config = {
   profileDir: resolve(process.env.PROFILE_DIR ?? ".data/profile"),
   sessionStatePath: resolve(process.env.SESSION_STATE_PATH ?? ".data/storage-state.json"),
   headless: process.env.HEADLESS === "1",
+  newChatSettleMs: positiveNumber("NEW_CHAT_SETTLE_MS", 3_000),
+  promptSettleMs: positiveNumber("PROMPT_SETTLE_MS", 750),
   responseTimeoutMs: positiveNumber("RESPONSE_TIMEOUT_MS", 300_000),
   stabilityDebounceMs: positiveNumber("STABILITY_DEBOUNCE_MS", 1_500),
+  completionFallbackMs: positiveNumber("COMPLETION_FALLBACK_MS", 10_000),
   pollIntervalMs: positiveNumber("POLL_INTERVAL_MS", 250),
   serverPort: positiveNumber("PORT", 8787),
 } as const;

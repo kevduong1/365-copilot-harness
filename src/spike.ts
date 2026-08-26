@@ -58,6 +58,22 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
       console.log("\nStreaming test response:\n");
       for await (const delta of client.send(prompt)) process.stdout.write(delta);
       process.stdout.write("\n");
+
+      const response = sel.assistantMessages(page).last();
+      const responseHtml = await response.innerHTML();
+      await writeFile(".data/response.html", responseHtml, "utf8");
+      const responseMarkers = await response.locator("[data-testid], [role], [aria-label]").evaluateAll(
+        (elements) =>
+          elements.map((element) => ({
+            tag: element.tagName.toLowerCase(),
+            role: element.getAttribute("role"),
+            ariaLabel: element.getAttribute("aria-label"),
+            testId: element.getAttribute("data-testid"),
+            text: (element.textContent ?? "").trim().slice(0, 120),
+          })),
+      );
+      console.log(JSON.stringify({ responseMarkers }, null, 2));
+      console.log("Wrote .data/response.html");
     }
   } finally {
     await client.close();

@@ -7,3 +7,14 @@ export {
   ResponseTimeoutError,
 } from "./errors.js";
 export { extractMarkdown } from "./extract.js";
+export { CodingAgent, type AgentRunnerOptions } from "./agent/runner.js";
+export { buildAgentSystemPrompt, type SystemPromptOptions } from "./agent/system-prompt.js";
+export { createWorkspaceTools } from "./agent/tools.js";
+export type {
+  AgentBackend,
+  AgentEvent,
+  ConfirmTool,
+  ToolCall,
+  ToolDefinition,
+  ToolResult,
+} from "./agent/types.js";
