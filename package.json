@@ -1,0 +1,31 @@
+{
+  "name": "365-copilot-harness",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A browser-backed M365 Copilot chat client and OpenAI-compatible shim",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "cli": "tsx src/cli.ts",
+    "server": "tsx src/server.ts",
+    "spike": "tsx src/spike.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test test/*.test.ts"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.19.1",
+    "hono": "^4.9.4",
+    "playwright": "^1.55.0",
+    "turndown": "^7.2.1",
+    "turndown-plugin-gfm": "^1.0.2"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "@types/turndown": "^5.0.5",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2"
+  },
+  "packageManager": "pnpm@10.19.0"
+}
