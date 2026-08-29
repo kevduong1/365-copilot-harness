@@ -138,3 +138,17 @@ test("invalid line edits leave the file unchanged", async (t) => {
   );
   assert.equal(await readFile(path, "utf8"), "one\ntwo\n");
 });
+
+test("bash timeout terminates the command's process group", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "copilot-tools-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const tools = await createWorkspaceTools(root);
+  const bash = tools.find((tool) => tool.name === "bash")!;
+  const started = Date.now();
+
+  await assert.rejects(
+    bash.execute({ command: "trap '' TERM; sleep 10 & wait", timeout_ms: 100 }),
+    /timed out after 100ms/,
+  );
+  assert.ok(Date.now() - started < 3_000);
+});

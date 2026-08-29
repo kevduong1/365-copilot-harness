@@ -1,3 +1,9 @@
+import {
+  buildCompactionBootstrapPrompt,
+  buildCompactionSummaryPrompt,
+  type ConversationCompactionResult,
+} from "../compaction.js";
+import { config } from "../config.js";
 import { buildAgentSystemPrompt } from "./system-prompt.js";
 import { formatToolResults, parseToolCalls } from "./protocol.js";
 import { createWorkspaceTools } from "./tools.js";
@@ -18,6 +24,7 @@ export interface AgentRunnerOptions {
   confirmTool?: ConfirmTool;
   onEvent?: (event: AgentEvent) => Promise<void> | void;
   tools?: ToolDefinition[];
+  autoCompact?: boolean;
 }
 
 export class CodingAgent {
@@ -27,7 +34,9 @@ export class CodingAgent {
   private readonly readOnly: boolean;
   private readonly confirmTool: ConfirmTool | undefined;
   private readonly onEvent: ((event: AgentEvent) => Promise<void> | void) | undefined;
+  private readonly autoCompact: boolean;
   private tools: ToolDefinition[] | undefined;
+  private activeSystemPrompt: string | undefined;
   private initialized = false;
   private newChatPrepared = false;
 
@@ -41,6 +50,7 @@ export class CodingAgent {
     this.readOnly = options.readOnly ?? false;
     this.confirmTool = options.confirmTool;
     this.onEvent = options.onEvent;
+    this.autoCompact = options.autoCompact ?? true;
     this.tools = options.tools;
   }
 
@@ -48,6 +58,84 @@ export class CodingAgent {
     await this.backend.newChat();
     this.initialized = false;
     this.newChatPrepared = true;
+    this.activeSystemPrompt = undefined;
+  }
+
+  /** Mark the current browser conversation as unrelated without opening another chat. */
+  invalidate(): void {
+    this.initialized = false;
+    this.newChatPrepared = false;
+    this.activeSystemPrompt = undefined;
+  }
+
+  async compact(automatic = false, step = 0): Promise<ConversationCompactionResult> {
+    if (!this.initialized) throw new Error("There is no active coding conversation to compact");
+    const tools = await this.availableTools();
+    const systemPrompt =
+      this.activeSystemPrompt ??
+      (await buildAgentSystemPrompt({
+        cwd: this.cwd,
+        allowedRoots: this.allowedRoots,
+        tools,
+      }));
+    const before = this.backend.getTokenUsage?.();
+    await this.emit({
+      type: "compaction",
+      phase: "start",
+      automatic,
+      ...(before === undefined ? {} : { before }),
+      step,
+    });
+
+    const options = {
+      bootstrapContext: `<coding_harness_system>\n${systemPrompt}\n</coding_harness_system>`,
+      readyMarker: "HARNESS_READY",
+      maxSummaryTokens: config.compactionSummaryTokens,
+    };
+    let result: ConversationCompactionResult;
+    try {
+      if (this.backend.compact !== undefined) {
+        result = await this.backend.compact(options);
+      } else {
+        const summary = (
+          await this.backend.sendAndWait(buildCompactionSummaryPrompt(options.maxSummaryTokens))
+        ).trim();
+        if (!summary) throw new Error("Copilot returned an empty conversation summary");
+        await this.backend.newChat();
+        const acknowledgement = await this.backend.sendAndWait(
+          buildCompactionBootstrapPrompt(summary, options),
+        );
+        result = { summary, acknowledgement };
+      }
+    } catch (error) {
+      // The failure may have happened after New chat. Force a full initialization
+      // on the next task instead of assuming the old coding protocol is active.
+      this.initialized = false;
+      this.newChatPrepared = false;
+      this.activeSystemPrompt = undefined;
+      throw error;
+    }
+
+    if (!result.acknowledgement.replaceAll("\\_", "_").includes("HARNESS_READY")) {
+      await this.emit({
+        type: "warning",
+        message: "Copilot did not acknowledge the compacted coding conversation",
+        step,
+      });
+    }
+    this.initialized = true;
+    this.newChatPrepared = false;
+    this.activeSystemPrompt = systemPrompt;
+    const after = this.backend.getTokenUsage?.();
+    await this.emit({
+      type: "compaction",
+      phase: "complete",
+      automatic,
+      ...(before === undefined ? {} : { before }),
+      ...(after === undefined ? {} : { after }),
+      step,
+    });
+    return result;
   }
 
   async run(task: string): Promise<string> {
@@ -63,6 +151,7 @@ export class CodingAgent {
         allowedRoots: this.allowedRoots,
         tools,
       });
+      this.activeSystemPrompt = systemPrompt;
       const acknowledgement = await this.backend.sendAndWait(
         `<coding_harness_system>\n${systemPrompt}\n</coding_harness_system>\n\nThe local coding harness is now active. Reply with exactly HARNESS_READY and nothing else.`,
       );
@@ -80,6 +169,7 @@ export class CodingAgent {
     }
 
     for (let step = 1; step <= this.maxSteps; step += 1) {
+      await this.compactIfNeeded(prompt, step);
       const response = await this.backend.sendAndWait(prompt);
       const parsed = parseToolCalls(response);
 
@@ -163,6 +253,16 @@ export class CodingAgent {
 
   private async emit(event: AgentEvent): Promise<void> {
     await this.onEvent?.(event);
+  }
+
+  private async compactIfNeeded(nextPrompt: string, step: number): Promise<void> {
+    if (
+      this.autoCompact &&
+      this.initialized &&
+      this.backend.needsCompaction?.(nextPrompt) === true
+    ) {
+      await this.compact(true, step);
+    }
   }
 
   private looksLikeToolRefusal(response: string): boolean {

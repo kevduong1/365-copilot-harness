@@ -88,8 +88,8 @@ export class M365CopilotAdapter implements ChatAdapter {
 
   async *send(prompt: string): AsyncIterable<string> {
     if (prompt.length === 0) throw new Error("Prompt must not be empty");
-    await this.ensureReady();
     this.lastMarkdown = "";
+    await this.ensureReady();
 
     const mountedBefore = await this.assistantResponseIds();
     for (const id of mountedBefore) this.knownAssistantIds.add(id);
@@ -169,6 +169,10 @@ export class M365CopilotAdapter implements ChatAdapter {
     for await (const _delta of this.send(prompt)) {
       // Draining the iterator waits for the authoritative final DOM state.
     }
+    return this.lastMarkdown;
+  }
+
+  lastResponse(): string {
     return this.lastMarkdown;
   }
 

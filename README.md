@@ -4,6 +4,7 @@ An experimental TypeScript bridge that treats the Microsoft 365 Copilot chat web
 
 - a `CopilotClient` library with streaming and non-streaming sends;
 - a coding-agent loop with local repository tools;
+- estimated conversation-token accounting and automatic context compaction;
 - an interactive agent/chat terminal; and
 - an OpenAI-compatible `/v1/chat/completions` HTTP shim.
 
@@ -62,10 +63,16 @@ An additional grant includes its descendants. Without `--add-dir`, attempts to r
 Useful commands:
 
 - `/tools` lists active tools.
+- `/tokens` shows the estimated conversation usage, assumed context budget, and compaction threshold.
+- `/compact` asks Copilot for a continuation summary, opens a new browser chat, restores the summary, and resumes there.
 - `/new` resets the browser conversation and reinjects the coding prompt on the next task.
 - `/chat` switches to the raw browser-chat bridge.
 - `/agent` returns to coding-agent mode.
 - `/quit` exits.
+
+The CLI shows an estimated token status after each completed task. Automatic compaction is enabled by default: before a send projected to meet 60% of the configured context budget, the harness summarizes the current conversation and continues it in a fresh chat. In coding-agent mode it also re-injects the original harness system prompt verbatim, so the summary is not responsible for reproducing the tool protocol. Mode switches start a fresh browser conversation to prevent raw chat from contaminating the coding-agent state. The OpenAI-compatible server applies the same automatic policy; low-level `CopilotClient` callers can use `needsCompaction(nextPrompt)` and `compact()` directly.
+
+Microsoft does not expose the selected model's tokenizer, the hidden prompt overhead, or a stable M365 Copilot Chat context-window size. The counter is therefore a conservative local estimate, not Microsoft-reported usage or billing data. It weights punctuation-heavy code and non-Latin text above ordinary English and includes per-message overhead. The default 32,000-token assumed window and 60% threshold intentionally leave substantial room for hidden instructions, grounding, summary generation, and the next response; tune both for your tenant with the variables below.
 
 Start a read-only agent:
 
@@ -121,6 +128,8 @@ curl -N http://127.0.0.1:8787/v1/chat/completions \
 
 Requests are serialized because one browser tab represents one conversation. The server sends only the newest user message and lets the browser retain context. It starts a new browser conversation when request history diverges from the preceding request. Send `X-New-Chat: true` to force a reset. A changed system message is prepended to the next user prompt.
 
+The server uses the same local estimator for its OpenAI-shaped `usage` fields and automatically compacts an extending browser conversation at the configured threshold. If a send or compaction leaves browser state ambiguous, the next request is forced into a clean chat.
+
 ## Library API
 
 ```ts
@@ -136,6 +145,8 @@ try {
   });
   const answer = await agent.run("Inspect this repository and summarize its architecture");
   console.log(answer);
+  console.log(client.getTokenUsage());
+  await agent.compact(); // summarize, open a new browser chat, and restore coding context
 } finally {
   await client.close();
 }
@@ -155,6 +166,10 @@ try {
 | `STABILITY_DEBOUNCE_MS` | `1500` | Required DOM quiet time after generation stops |
 | `COMPLETION_FALLBACK_MS` | `10000` | DOM-idle fallback when M365 exposes no completion control |
 | `POLL_INTERVAL_MS` | `250` | Streaming DOM poll cadence |
+| `CONTEXT_WINDOW_TOKENS` | `32000` | Assumed context budget used only for local estimates and compaction decisions |
+| `AUTO_COMPACT` | `true` | Set to `0` or `false` to disable threshold-triggered compaction |
+| `AUTO_COMPACT_PERCENT` | `60` | Percentage of the assumed context budget that triggers compaction before the next send |
+| `COMPACTION_SUMMARY_TOKENS` | `4000` | Requested maximum size of a generated continuation summary |
 | `PORT` | `8787` | HTTP server port |
 
 ## Selector discovery
@@ -179,6 +194,8 @@ pnpm test
 
 - Browser selectors can drift without notice and must be calibrated against a live authenticated tenant.
 - Copilot prompt limits are much smaller than API context windows. A rejected or truncated prompt raises `PromptTooLargeError`.
+- Token counts and compaction thresholds are estimates because M365 does not expose its tokenizer, model choice, hidden context, or usage. Existing messages already open in the browser before the harness starts are not counted.
+- Compaction is lossy by nature. The prompt emphasizes goals, decisions, exact state, completed work, pending steps, and protocols, but critical information should still live in the repository or another durable artifact.
 - Tool calls use a prompted text protocol rather than a native model API, so malformed calls are reported back to Copilot for correction and the loop is capped at 16 steps.
 - Mutating tools can change repository files or run arbitrary workspace shell commands after approval. Review proposed arguments carefully and use `--read-only` for audits.
 - Streaming is derived by polling and diffing rendered Markdown. If Copilot rewrites an earlier portion, the authoritative full response is emitted at completion.

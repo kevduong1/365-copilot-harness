@@ -4,6 +4,7 @@ import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import type { ToolDefinition } from "./types.js";
 
 const MAX_OUTPUT_CHARS = 80_000;
+const FORCE_KILL_GRACE_MS = 1_000;
 
 function stringArg(args: Record<string, unknown>, name: string, fallback?: string): string {
   const value = args[name];
@@ -91,13 +92,28 @@ async function runProcess(
   timeoutMs = 30_000,
 ): Promise<ProcessResult> {
   return new Promise((resolvePromise, reject) => {
-    const child = spawn(command, args, { cwd, stdio: ["ignore", "pipe", "pipe"] });
+    const useProcessGroup = process.platform !== "win32";
+    const child = spawn(command, args, {
+      cwd,
+      detached: useProcessGroup,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
     let stdout = "";
     let stderr = "";
     let timedOut = false;
+    let forceKillTimer: NodeJS.Timeout | undefined;
+    const kill = (signal: NodeJS.Signals): void => {
+      try {
+        if (useProcessGroup && child.pid !== undefined) process.kill(-child.pid, signal);
+        else child.kill(signal);
+      } catch {
+        // The process may have exited between the timeout and this signal.
+      }
+    };
     const timer = setTimeout(() => {
       timedOut = true;
-      child.kill("SIGTERM");
+      kill("SIGTERM");
+      forceKillTimer = setTimeout(() => kill("SIGKILL"), FORCE_KILL_GRACE_MS);
     }, timeoutMs);
 
     child.stdout.setEncoding("utf8");
@@ -110,10 +126,12 @@ async function runProcess(
     });
     child.once("error", (error) => {
       clearTimeout(timer);
+      if (forceKillTimer !== undefined) clearTimeout(forceKillTimer);
       reject(error);
     });
     child.once("close", (code) => {
       clearTimeout(timer);
+      if (forceKillTimer !== undefined) clearTimeout(forceKillTimer);
       if (timedOut) {
         reject(new Error(`Command timed out after ${timeoutMs}ms`));
         return;

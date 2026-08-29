@@ -7,6 +7,7 @@ import { CodingAgent } from "./agent/runner.js";
 import type { AgentEvent, ToolCall, ToolDefinition } from "./agent/types.js";
 import { CopilotClient } from "./client.js";
 import { ResponseTimeoutError } from "./errors.js";
+import type { TokenUsageEstimate } from "./tokens.js";
 
 interface CliOptions {
   command: "help" | "login" | "interactive" | "print";
@@ -131,8 +132,25 @@ function eventPrinter(destination: NodeJS.WritableStream): (event: AgentEvent) =
       );
     } else if (event.type === "warning") {
       destination.write(`[warning] ${event.message}\n`);
+    } else if (event.type === "compaction" && event.phase === "start") {
+      const usage = event.before;
+      const amount = usage === undefined ? "" : ` at ~${usage.conversationTokens.toLocaleString("en-US")} tokens`;
+      destination.write(
+        `[compaction] ${event.automatic ? "Auto-compacting" : "Compacting"}${amount}; summarizing into a new browser chat...\n`,
+      );
+    } else if (event.type === "compaction" && event.phase === "complete") {
+      const usage = event.after;
+      const amount = usage === undefined ? "" : ` (~${usage.conversationTokens.toLocaleString("en-US")} tokens retained)`;
+      destination.write(`[compaction] Continued in a new browser chat${amount}.\n`);
     }
   };
+}
+
+function tokenStatus(usage: TokenUsageEstimate, autoCompact: boolean): string {
+  const threshold = autoCompact
+    ? `auto-compact at ${usage.compactionThresholdPercent}%`
+    : "auto-compaction disabled";
+  return `[tokens] ~${usage.conversationTokens.toLocaleString("en-US")} / ${usage.contextWindowTokens.toLocaleString("en-US")} (${usage.usagePercent.toFixed(1)}% estimated; ${threshold})`;
 }
 
 function approvalPrompt(
@@ -160,6 +178,7 @@ async function interactive(options: CliOptions): Promise<void> {
     confirmTool: approvalPrompt(readline, options.autoApprove),
     onEvent: eventPrinter(stdout),
   });
+  if (!agentMode) await client.newChat();
 
   const close = async (): Promise<void> => {
     if (closing) return;
@@ -177,7 +196,7 @@ async function interactive(options: CliOptions): Promise<void> {
   if (options.allowedRoots.length > 0) {
     console.log(`Additional allowed roots: ${options.allowedRoots.join(", ")}`);
   }
-  console.log("Commands: /agent, /chat, /tools, /new, /help, /quit");
+  console.log("Commands: /agent, /chat, /tools, /tokens, /compact, /new, /help, /quit");
 
   try {
     while (!closing) {
@@ -194,26 +213,64 @@ async function interactive(options: CliOptions): Promise<void> {
       if (prompt === "/help") {
         console.log("Agent mode executes structured local tools. Chat mode sends raw prompts without tools.");
         console.log("Mutating tools ask for approval unless the CLI was started with --yes.");
+        console.log("Token counts are estimates; /compact summarizes into a fresh browser chat.");
         continue;
       }
       if (prompt === "/agent") {
+        if (agentMode) {
+          console.log("Agent mode is already enabled.");
+          continue;
+        }
         agentMode = true;
         console.log("Agent mode enabled. Its first task starts a fresh coding conversation.");
         continue;
       }
       if (prompt === "/chat") {
+        if (!agentMode) {
+          console.log("Raw chat mode is already enabled.");
+          continue;
+        }
+        await client.newChat();
+        agent.invalidate();
         agentMode = false;
-        console.log("Raw chat mode enabled.");
+        console.log("Raw chat mode enabled in a fresh conversation.");
         continue;
       }
       if (prompt === "/tools") {
         console.log((await agent.toolNames()).join(", "));
         continue;
       }
+      if (prompt === "/tokens") {
+        console.log(tokenStatus(client.getTokenUsage(), client.isAutoCompactionEnabled()));
+        continue;
+      }
+      if (prompt === "/compact") {
+        try {
+          if (client.getTokenUsage().messageCount === 0) {
+            console.log("There is no conversation to compact.");
+          } else if (agentMode) {
+            await agent.compact();
+            console.log(tokenStatus(client.getTokenUsage(), client.isAutoCompactionEnabled()));
+          } else {
+            const result = await client.compact();
+            if (!result.acknowledged) {
+              console.warn("[warning] Copilot did not acknowledge the compacted conversation.");
+            }
+            console.log(
+              `[compaction] Continued in a new browser chat (~${result.after.conversationTokens.toLocaleString("en-US")} tokens retained).`,
+            );
+            console.log(tokenStatus(result.after, client.isAutoCompactionEnabled()));
+          }
+        } catch (error) {
+          console.error(`\n${displayedError(error)}`);
+        }
+        continue;
+      }
       if (prompt === "/new") {
         if (agentMode) await agent.reset();
         else await client.newChat();
         console.log("Started a new conversation.");
+        console.log(tokenStatus(client.getTokenUsage(), client.isAutoCompactionEnabled()));
         continue;
       }
 
@@ -222,10 +279,21 @@ async function interactive(options: CliOptions): Promise<void> {
           const result = await agent.run(prompt);
           stdout.write(`\n${result}\n`);
         } else {
+          if (client.needsCompaction(prompt)) {
+            const before = client.getTokenUsage();
+            console.log(
+              `[compaction] Auto-compacting at ~${before.conversationTokens.toLocaleString("en-US")} tokens; summarizing into a new browser chat...`,
+            );
+            const compacted = await client.compact();
+            if (!compacted.acknowledged) {
+              console.warn("[warning] Copilot did not acknowledge the compacted conversation.");
+            }
+          }
           stdout.write("\n");
           for await (const delta of client.send(prompt)) stdout.write(delta);
           stdout.write("\n");
         }
+        console.log(tokenStatus(client.getTokenUsage(), client.isAutoCompactionEnabled()));
       } catch (error) {
         console.error(`\n${displayedError(error)}`);
       }

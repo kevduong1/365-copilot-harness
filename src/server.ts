@@ -6,6 +6,7 @@ import { pathToFileURL } from "node:url";
 import { CopilotClient } from "./client.js";
 import { config } from "./config.js";
 import { Mutex } from "./queue.js";
+import { estimateTokens } from "./tokens.js";
 
 const MODEL = "copilot-browser";
 
@@ -29,6 +30,8 @@ export interface BrowserChatClient {
   send(prompt: string): AsyncIterable<string>;
   sendAndWait(prompt: string): Promise<string>;
   newChat(): Promise<void>;
+  needsCompaction?(nextPrompt?: string): boolean;
+  compact?(): Promise<unknown>;
 }
 
 function textContent(content: ChatMessage["content"]): string {
@@ -55,10 +58,6 @@ function completionId(): string {
   return `chatcmpl-${crypto.randomUUID().replaceAll("-", "")}`;
 }
 
-function tokens(text: string): number {
-  return Math.ceil(text.length / 4);
-}
-
 function parseRequest(value: unknown): CompletionRequest {
   if (typeof value !== "object" || value === null) throw new Error("Request body must be a JSON object");
   const candidate = value as Partial<CompletionRequest>;
@@ -70,7 +69,15 @@ function parseRequest(value: unknown): CompletionRequest {
       typeof message !== "object" ||
       message === null ||
       !["system", "user", "assistant", "tool"].includes(message.role) ||
-      !(typeof message.content === "string" || Array.isArray(message.content))
+      !(typeof message.content === "string" || Array.isArray(message.content)) ||
+      (Array.isArray(message.content) &&
+        !message.content.every(
+          (part) =>
+            typeof part === "object" &&
+            part !== null &&
+            part.type === "text" &&
+            typeof part.text === "string",
+        ))
     ) {
       throw new Error("Each message needs a supported role and string or text-part content");
     }
@@ -126,10 +133,25 @@ export function createApp(client: BrowserChatClient): Hono {
         const userText = textContent(lastUser.content);
         const includeSystem = systemText !== undefined && (reset || systemText !== previousSystem);
         const prompt = includeSystem ? `${systemText}\n\n${userText}` : userText;
-        const result = await respond(prompt);
-        previousMessages = body.messages.map((message) => ({ ...message }));
-        previousSystem = systemText;
-        return result;
+        try {
+          if (
+            !reset &&
+            client.compact !== undefined &&
+            client.needsCompaction?.(prompt) === true
+          ) {
+            await client.compact();
+          }
+          const result = await respond(prompt);
+          previousMessages = body.messages.map((message) => ({ ...message }));
+          previousSystem = systemText;
+          return result;
+        } catch (error) {
+          // A send or compaction can fail after mutating the browser chat. Force
+          // the next request to start clean rather than trusting stale history.
+          previousMessages = undefined;
+          previousSystem = undefined;
+          throw error;
+        }
       });
     };
 
@@ -158,9 +180,9 @@ export function createApp(client: BrowserChatClient): Hono {
                 model: requestedModel,
                 choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
                 usage: {
-                  prompt_tokens: tokens(prompt),
-                  completion_tokens: tokens(completion),
-                  total_tokens: tokens(prompt) + tokens(completion),
+                  prompt_tokens: estimateTokens(prompt),
+                  completion_tokens: estimateTokens(completion),
+                  total_tokens: estimateTokens(prompt) + estimateTokens(completion),
                 },
               }),
             });
@@ -177,8 +199,8 @@ export function createApp(client: BrowserChatClient): Hono {
         prompt,
         completion: await client.sendAndWait(prompt),
       }));
-      const promptTokens = tokens(result.prompt);
-      const completionTokens = tokens(result.completion);
+      const promptTokens = estimateTokens(result.prompt);
+      const completionTokens = estimateTokens(result.completion);
       return c.json({
         id,
         object: "chat.completion",

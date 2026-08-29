@@ -1,5 +1,7 @@
 # M365 Copilot Browser Harness — Phase 1 MVP Plan
 
+> Historical design document. The implementation now includes the coding-agent phase, token estimation, and context compaction; see `README.md` for current behavior and configuration.
+
 ## Context
 
 Goal: build a coding/agentic harness (Hermes/pi-style) whose "model backend" is not an API but the **M365 Copilot chat web UI**, driven by browser automation. Prompts are typed into the chat input, responses are scraped from the DOM.
