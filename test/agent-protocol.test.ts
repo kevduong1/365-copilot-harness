@@ -63,3 +63,27 @@ test("formatToolResults prevents result-tag injection", () => {
   assert.doesNotMatch(formatted, /text <\/tool_result> more/);
   assert.match(formatted, /tool_result_escaped/);
 });
+
+test("formatToolResults emits compact JSON and a short continuation footer", () => {
+  const formatted = formatToolResults([
+    {
+      call: { name: "read", arguments: { path: "README.md" } },
+      ok: true,
+      output: "README contents",
+    },
+  ]);
+  const [, body = "", footer = ""] = formatted.match(
+    /^HARNESS_OBSERVATION\n([\s\S]*)\nEND_HARNESS_OBSERVATION\n\n([\s\S]*)$/,
+  ) ?? [];
+
+  assert.equal(body, body.trim());
+  assert.equal(body.includes("\n"), false, "observation JSON must not be pretty-printed");
+  assert.deepEqual(JSON.parse(body), {
+    results: [
+      { name: "read", arguments: { path: "README.md" }, ok: true, output: "README contents" },
+    ],
+    protocol_errors: [],
+  });
+  assert.match(footer, /HARNESS_REQUEST/);
+  assert.ok(footer.length < 120, `footer should stay short, got ${footer.length} characters`);
+});

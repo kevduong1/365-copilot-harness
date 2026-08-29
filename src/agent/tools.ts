@@ -261,8 +261,8 @@ export async function createWorkspaceTools(
   const tools: ToolDefinition[] = [
     {
       name: "pwd",
-      description: "Show the controller's current working directory and every filesystem root granted to this session.",
-      parameters: "{}",
+      description: "Show the current working directory and every granted filesystem root.",
+      parameters: "none",
       mutates: false,
       execute: async () =>
         [
@@ -273,8 +273,8 @@ export async function createWorkspaceTools(
     },
     {
       name: "cd",
-      description: "Change the persistent working directory for subsequent controller operations. The destination must be inside an allowed root.",
-      parameters: '{"path":"/absolute/or/relative/directory"}',
+      description: "Change the persistent working directory; the destination must be inside an allowed root.",
+      parameters: "path",
       mutates: false,
       execute: async (args) => {
         const next = await workspace.changeDirectory(stringArg(args, "path"));
@@ -284,7 +284,7 @@ export async function createWorkspaceTools(
     {
       name: "read",
       description: "Read a UTF-8 text file with numbered lines. Use offset and limit for large files.",
-      parameters: '{"path":"relative/file.ts","offset":1,"limit":300}',
+      parameters: "path, offset?=1, limit?=300",
       mutates: false,
       execute: async (args) => {
         const path = await workspace.existing(stringArg(args, "path"));
@@ -301,8 +301,8 @@ export async function createWorkspaceTools(
     },
     {
       name: "grep",
-      description: "Search file contents with ripgrep regular expressions and return file, line, and column matches.",
-      parameters: '{"pattern":"expression","path":"src","glob":"*.ts","max_results":200}',
+      description: "Search file contents with ripgrep regexes; returns file, line, and column matches.",
+      parameters: 'pattern, path?=".", glob?, max_results?=200',
       mutates: false,
       execute: async (args) => {
         const pattern = stringArg(args, "pattern");
@@ -331,7 +331,7 @@ export async function createWorkspaceTools(
     {
       name: "find",
       description: "List repository files, optionally below a path and filtered by an rg glob.",
-      parameters: '{"path":"src","glob":"*.ts","max_results":500}',
+      parameters: 'path?=".", glob?, max_results?=500',
       mutates: false,
       execute: async (args) => {
         const requested = stringArg(args, "path", ".");
@@ -360,7 +360,7 @@ export async function createWorkspaceTools(
     {
       name: "ls",
       description: "List one directory with entry types and sizes.",
-      parameters: '{"path":"src"}',
+      parameters: 'path?="."',
       mutates: false,
       execute: async (args) => {
         const path = await workspace.existing(stringArg(args, "path", "."));
@@ -379,8 +379,9 @@ export async function createWorkspaceTools(
     },
     {
       name: "edit",
-      description: "Edit an existing UTF-8 file using either an exact text replacement or an inclusive line range from numbered read output. Exact mode is unique by default; set replace_all only intentionally.",
-      parameters: 'exact: {"path":"src/file.ts","old_text":"exact text","new_text":"replacement","replace_all":false}; line range: {"path":"src/file.ts","start_line":10,"end_line":12,"new_text":"replacement lines"}',
+      description: "Edit an existing UTF-8 file by exact text replacement or by inclusive line range. Exact mode requires a unique match unless replace_all is set.",
+      parameters:
+        "(exact) path, old_text, new_text, replace_all?=false | (line-range) path, start_line, end_line?=start_line, new_text",
       mutates: true,
       execute: async (args) => {
         const path = await workspace.existing(stringArg(args, "path"));
@@ -438,7 +439,7 @@ export async function createWorkspaceTools(
     {
       name: "write",
       description: "Create or completely overwrite a UTF-8 file, creating parent directories as needed.",
-      parameters: '{"path":"relative/file.ts","content":"complete file contents"}',
+      parameters: "path, content",
       mutates: true,
       execute: async (args) => {
         const path = await workspace.writable(stringArg(args, "path"));
@@ -450,8 +451,8 @@ export async function createWorkspaceTools(
     },
     {
       name: "bash",
-      description: "Run a shell command in the workspace. Use for tests, builds, git status, and operations without a dedicated tool.",
-      parameters: '{"command":"pnpm test","timeout_ms":30000}',
+      description: "Run a shell command in the workspace: tests, builds, git, and anything without a dedicated operation.",
+      parameters: "command, timeout_ms?=30000",
       mutates: true,
       execute: async (args) => {
         const command = stringArg(args, "command");

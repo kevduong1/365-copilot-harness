@@ -6,6 +6,7 @@ import type {
   ConversationCompactionOptions,
   ConversationCompactionResult,
 } from "../src/compaction.js";
+import type { TokenUsageEstimate } from "../src/tokens.js";
 
 class ScriptedBackend implements AgentBackend {
   readonly prompts: string[] = [];
@@ -27,7 +28,6 @@ class ScriptedBackend implements AgentBackend {
 
 test("CodingAgent loops through tools and preserves conversation for follow-up tasks", async () => {
   const backend = new ScriptedBackend([
-    "HARNESS_READY",
     'HARNESS_REQUEST\n{"operation":"grep","arguments":{"pattern":"CopilotClient"}}\nEND_HARNESS_REQUEST',
     "The client composes browser transport and locking.",
     "The follow-up remains in the same coding conversation.",
@@ -37,7 +37,7 @@ test("CodingAgent loops through tools and preserves conversation for follow-up t
     {
       name: "grep",
       description: "test grep",
-      parameters: '{"pattern":"text"}',
+      parameters: "pattern",
       mutates: false,
       execute: async () => "src/client.ts: CopilotClient",
     },
@@ -50,23 +50,25 @@ test("CodingAgent loops through tools and preserves conversation for follow-up t
   });
 
   assert.equal(await agent.run("Explain the client"), "The client composes browser transport and locking.");
+  // Initialization rides along with the first task rather than costing its own round trip.
   assert.match(backend.prompts[0] ?? "", /coding_harness_system/);
+  assert.match(backend.prompts[0] ?? "", /<user_task>\nExplain the client\n<\/user_task>/);
   assert.match(backend.prompts[0] ?? "", /external local controller/);
-  assert.match(backend.prompts[0] ?? "", /not a claim about your native toolset/);
-  assert.match(backend.prompts[2] ?? "", /src\/client\.ts: CopilotClient/);
+  assert.match(backend.prompts[0] ?? "", /not an attempt to invoke a Microsoft Copilot tool/);
+  assert.match(backend.prompts[1] ?? "", /src\/client\.ts: CopilotClient/);
   assert.equal(events.filter((event) => event.type === "tool_end").length, 1);
 
   assert.equal(
     await agent.run("What about follow-ups?"),
     "The follow-up remains in the same coding conversation.",
   );
-  assert.doesNotMatch(backend.prompts[3] ?? "", /coding_harness_system/);
+  assert.doesNotMatch(backend.prompts[2] ?? "", /coding_harness_system/);
+  assert.equal(backend.prompts.length, 3);
   assert.equal(backend.newChats, 1);
 });
 
 test("CodingAgent asks before executing mutating tools", async () => {
   const backend = new ScriptedBackend([
-    "HARNESS_READY",
     '<tool_call>{"name":"write","arguments":{"path":"x","content":"y"}}</tool_call>',
     "I could not write because approval was declined.",
   ]);
@@ -74,7 +76,7 @@ test("CodingAgent asks before executing mutating tools", async () => {
   const tool: ToolDefinition = {
     name: "write",
     description: "write",
-    parameters: "{}",
+    parameters: "none",
     mutates: true,
     execute: async () => {
       executed = true;
@@ -88,12 +90,11 @@ test("CodingAgent asks before executing mutating tools", async () => {
 
   await agent.run("Write x");
   assert.equal(executed, false);
-  assert.match(backend.prompts[2] ?? "", /User declined write/);
+  assert.match(backend.prompts[1] ?? "", /User declined write/);
 });
 
 test("CodingAgent corrects a false claim that local tools are unavailable", async () => {
   const backend = new ScriptedBackend([
-    "HARNESS_READY",
     "I cannot access the local execution environment.",
     'HARNESS_REQUEST\n{"operation":"read","arguments":{"path":"README.md"}}\nEND_HARNESS_REQUEST',
     "The repository is a browser-backed coding harness.",
@@ -102,7 +103,7 @@ test("CodingAgent corrects a false claim that local tools are unavailable", asyn
   const read: ToolDefinition = {
     name: "read",
     description: "read",
-    parameters: "{}",
+    parameters: "none",
     mutates: false,
     execute: async () => "README contents",
   };
@@ -114,12 +115,12 @@ test("CodingAgent corrects a false claim that local tools are unavailable", asyn
   });
 
   assert.equal(await agent.run("Summarize the repository"), "The repository is a browser-backed coding harness.");
-  assert.match(backend.prompts[2] ?? "", /HARNESS_PROTOCOL_CORRECTION/);
+  assert.match(backend.prompts[1] ?? "", /HARNESS_PROTOCOL_CORRECTION/);
   assert.match(warnings.join("\n"), /unavailable/);
 });
 
 test("CodingAgent reset does not open the new chat twice", async () => {
-  const backend = new ScriptedBackend(["HARNESS_READY", "Reset task complete."]);
+  const backend = new ScriptedBackend(["Reset task complete."]);
   const agent = new CodingAgent(backend, { tools: [] });
 
   await agent.reset();
@@ -128,12 +129,12 @@ test("CodingAgent reset does not open the new chat twice", async () => {
 });
 
 test("CodingAgent advertises persistent directory tools and granted roots", async () => {
-  const backend = new ScriptedBackend(["HARNESS_READY", "Done."]);
+  const backend = new ScriptedBackend(["Done."]);
   const tools: ToolDefinition[] = [
     {
       name: "cd",
       description: "change directory",
-      parameters: '{"path":"directory"}',
+      parameters: "path",
       mutates: false,
       execute: async () => "changed",
     },
@@ -146,13 +147,17 @@ test("CodingAgent advertises persistent directory tools and granted roots", asyn
 
   await agent.run("Inspect another project");
   assert.match(backend.prompts[0] ?? "", /Use pwd/);
-  assert.match(backend.prompts[0] ?? "", /Use cd to change the persistent working directory/);
+  assert.match(backend.prompts[0] ?? "", /cd to switch projects persistently/);
   assert.match(backend.prompts[0] ?? "", /\/workspace\/two/);
+  // Each operation renders on one line as "- name (kind): description — args: signature".
+  assert.match(
+    backend.prompts[0] ?? "",
+    /^- cd \(read-only\): change directory — args: path$/m,
+  );
 });
 
 test("CodingAgent compacts into a new chat and restores the exact coding context", async () => {
   const backend = new ScriptedBackend([
-    "HARNESS_READY",
     "Initial task complete.",
     "The user asked for an audit. The initial task is complete; wait for a follow-up.",
     "HARNESS_READY",
@@ -163,14 +168,14 @@ test("CodingAgent compacts into a new chat and restores the exact coding context
   assert.equal(await agent.run("Do the initial task"), "Initial task complete.");
   const compacted = await agent.compact();
   assert.match(compacted.summary, /initial task is complete/i);
-  assert.match(backend.prompts[2] ?? "", /standalone continuation summary/);
-  assert.match(backend.prompts[3] ?? "", /<coding_harness_system>/);
-  assert.match(backend.prompts[3] ?? "", /<compacted_conversation_json>/);
-  assert.match(backend.prompts[3] ?? "", /HARNESS_READY/);
+  assert.match(backend.prompts[1] ?? "", /standalone continuation summary/);
+  assert.match(backend.prompts[2] ?? "", /<coding_harness_system>/);
+  assert.match(backend.prompts[2] ?? "", /<compacted_conversation_summary>/);
+  assert.match(backend.prompts[2] ?? "", /HARNESS_READY/);
   assert.equal(backend.newChats, 2);
 
   assert.equal(await agent.run("Continue"), "Continued from the compacted state.");
-  assert.doesNotMatch(backend.prompts[4] ?? "", /<coding_harness_system>/);
+  assert.doesNotMatch(backend.prompts[3] ?? "", /<coding_harness_system>/);
 });
 
 class AutoCompactingBackend implements AgentBackend {
@@ -178,7 +183,7 @@ class AutoCompactingBackend implements AgentBackend {
   compactCalls = 0;
   compactOptions: ConversationCompactionOptions | undefined;
   shouldCompact = false;
-  private readonly responses = ["HARNESS_READY", "First answer.", "Second answer."];
+  private readonly responses = ["First answer.", "Second answer."];
 
   async newChat(): Promise<void> {}
 
@@ -223,10 +228,151 @@ test("CodingAgent automatically compacts before the next prompt at the backend t
   );
 });
 
+class ResumingBackend implements AgentBackend {
+  readonly prompts: string[] = [];
+  newChats = 0;
+  compactCalls = 0;
+  compactOptions: ConversationCompactionOptions | undefined;
+  shouldCompact = false;
+
+  constructor(private readonly responses: string[]) {}
+
+  async newChat(): Promise<void> {
+    this.newChats += 1;
+  }
+
+  async sendAndWait(prompt: string): Promise<string> {
+    this.prompts.push(prompt);
+    const response = this.responses.shift();
+    if (response === undefined) throw new Error("No scripted response");
+    return response;
+  }
+
+  needsCompaction(): boolean {
+    return this.shouldCompact;
+  }
+
+  async compact(options: ConversationCompactionOptions = {}): Promise<ConversationCompactionResult> {
+    this.compactCalls += 1;
+    this.compactOptions = options;
+    this.shouldCompact = false;
+    const reply = await this.sendAndWait(`BOOTSTRAP\n${options.resumePrompt ?? ""}`);
+    return options.resumePrompt === undefined
+      ? { summary: "Prior work summarized.", acknowledgement: reply }
+      : { summary: "Prior work summarized.", acknowledgement: reply, response: reply };
+  }
+}
+
+test("CodingAgent resumes the pending prompt from the compaction bootstrap itself", async () => {
+  const backend = new ResumingBackend([
+    'HARNESS_REQUEST\n{"operation":"read","arguments":{"path":"a.ts"}}\nEND_HARNESS_REQUEST',
+    "Answered from the compacted chat.",
+  ]);
+  const read: ToolDefinition = {
+    name: "read",
+    description: "read",
+    parameters: "path",
+    mutates: false,
+    execute: async () => "file body",
+  };
+  const agent = new CodingAgent(backend, { tools: [read] });
+
+  backend.shouldCompact = true;
+  assert.equal(await agent.run("Inspect a.ts"), "Answered from the compacted chat.");
+  // Two sends: the initial task, then the bootstrap that carries the observation.
+  assert.equal(backend.prompts.length, 2);
+  assert.equal(backend.compactCalls, 1);
+  assert.match(backend.compactOptions?.resumePrompt ?? "", /HARNESS_OBSERVATION/);
+  assert.match(backend.compactOptions?.resumePrompt ?? "", /file body/);
+  assert.match(backend.prompts[1] ?? "", /BOOTSTRAP/);
+});
+
+test("CodingAgent still takes an acknowledgement turn for a manual compaction", async () => {
+  const backend = new ResumingBackend(["First answer.", "HARNESS_READY", "Second answer."]);
+  const warnings: string[] = [];
+  const agent = new CodingAgent(backend, {
+    tools: [],
+    onEvent: (event) => {
+      if (event.type === "warning") warnings.push(event.message);
+    },
+  });
+
+  assert.equal(await agent.run("First"), "First answer.");
+  const result = await agent.compact();
+  assert.equal(result.response, undefined);
+  assert.equal(result.acknowledgement, "HARNESS_READY");
+  assert.equal(backend.compactOptions?.resumePrompt, undefined);
+  assert.equal(await agent.run("Second"), "Second answer.");
+  assert.deepEqual(warnings, []);
+});
+
+class ThrashingCompactionBackend implements AgentBackend {
+  readonly prompts: string[] = [];
+  compactCalls = 0;
+  shouldCompact = false;
+
+  constructor(private readonly responses: string[]) {}
+
+  async newChat(): Promise<void> {}
+
+  async sendAndWait(prompt: string): Promise<string> {
+    this.prompts.push(prompt);
+    const response = this.responses.shift();
+    if (response === undefined) throw new Error("No scripted response");
+    return response;
+  }
+
+  needsCompaction(): boolean {
+    return this.shouldCompact;
+  }
+
+  getTokenUsage(): TokenUsageEstimate {
+    // A summary larger than the configured window: compaction cannot help.
+    return {
+      conversationTokens: 900,
+      contextWindowTokens: 1_000,
+      remainingTokens: 100,
+      usagePercent: 90,
+      compactionThresholdTokens: 600,
+      compactionThresholdPercent: 60,
+      messageCount: 2,
+    };
+  }
+
+  async compact(): Promise<ConversationCompactionResult> {
+    this.compactCalls += 1;
+    return {
+      summary: "Oversized summary.",
+      acknowledgement: "Resumed answer.",
+      response: "Resumed answer.",
+    };
+  }
+}
+
+test("CodingAgent warns and pauses when compaction does not get under the threshold", async () => {
+  const backend = new ThrashingCompactionBackend(["First answer.", "Third answer."]);
+  const warnings: string[] = [];
+  const agent = new CodingAgent(backend, {
+    tools: [],
+    onEvent: (event) => {
+      if (event.type === "warning") warnings.push(event.message);
+    },
+  });
+
+  assert.equal(await agent.run("First"), "First answer.");
+  backend.shouldCompact = true;
+  assert.equal(await agent.run("Second"), "Resumed answer.");
+  assert.match(warnings.join("\n"), /still at or above the 60% threshold/);
+
+  // The threshold is still exceeded, but the next step must not compact again.
+  assert.equal(await agent.run("Third"), "Third answer.");
+  assert.equal(backend.compactCalls, 1);
+});
+
 class FailingCompactionBackend implements AgentBackend {
   readonly prompts: string[] = [];
   newChats = 0;
-  private readonly responses = ["HARNESS_READY", "First answer.", "HARNESS_READY", "Recovered."];
+  private readonly responses = ["First answer.", "Recovered."];
 
   async newChat(): Promise<void> {
     this.newChats += 1;
@@ -251,6 +397,6 @@ test("CodingAgent fully reinitializes after an ambiguous compaction failure", as
   assert.equal(await agent.run("First"), "First answer.");
   await assert.rejects(agent.compact(), /bootstrap failed/);
   assert.equal(await agent.run("Recover"), "Recovered.");
-  assert.match(backend.prompts[2] ?? "", /<coding_harness_system>/);
+  assert.match(backend.prompts[1] ?? "", /<coding_harness_system>/);
   assert.equal(backend.newChats, 2);
 });

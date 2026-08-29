@@ -1,6 +1,7 @@
 import {
   buildCompactionBootstrapPrompt,
   buildCompactionSummaryPrompt,
+  type ConversationCompactionOptions,
   type ConversationCompactionResult,
 } from "../compaction.js";
 import { config } from "../config.js";
@@ -39,6 +40,8 @@ export class CodingAgent {
   private activeSystemPrompt: string | undefined;
   private initialized = false;
   private newChatPrepared = false;
+  /** Set when a compaction left usage above the threshold, to avoid thrashing. */
+  private skipNextCompaction = false;
 
   constructor(
     private readonly backend: AgentBackend,
@@ -59,6 +62,7 @@ export class CodingAgent {
     this.initialized = false;
     this.newChatPrepared = true;
     this.activeSystemPrompt = undefined;
+    this.skipNextCompaction = false;
   }
 
   /** Mark the current browser conversation as unrelated without opening another chat. */
@@ -66,9 +70,19 @@ export class CodingAgent {
     this.initialized = false;
     this.newChatPrepared = false;
     this.activeSystemPrompt = undefined;
+    this.skipNextCompaction = false;
   }
 
-  async compact(automatic = false, step = 0): Promise<ConversationCompactionResult> {
+  /**
+   * Summarize the conversation into a fresh chat. A `resumePrompt` rides along
+   * with the bootstrap so the pending message costs no extra browser round trip;
+   * the reply comes back as `response`.
+   */
+  async compact(
+    automatic = false,
+    step = 0,
+    resumePrompt?: string,
+  ): Promise<ConversationCompactionResult> {
     if (!this.initialized) throw new Error("There is no active coding conversation to compact");
     const tools = await this.availableTools();
     const systemPrompt =
@@ -87,10 +101,11 @@ export class CodingAgent {
       step,
     });
 
-    const options = {
+    const options: ConversationCompactionOptions = {
       bootstrapContext: `<coding_harness_system>\n${systemPrompt}\n</coding_harness_system>`,
       readyMarker: "HARNESS_READY",
       maxSummaryTokens: config.compactionSummaryTokens,
+      ...(resumePrompt === undefined ? {} : { resumePrompt }),
     };
     let result: ConversationCompactionResult;
     try {
@@ -98,14 +113,20 @@ export class CodingAgent {
         result = await this.backend.compact(options);
       } else {
         const summary = (
-          await this.backend.sendAndWait(buildCompactionSummaryPrompt(options.maxSummaryTokens))
+          await this.backend.sendAndWait(
+            buildCompactionSummaryPrompt(options.maxSummaryTokens ?? config.compactionSummaryTokens),
+          )
         ).trim();
         if (!summary) throw new Error("Copilot returned an empty conversation summary");
         await this.backend.newChat();
-        const acknowledgement = await this.backend.sendAndWait(
+        const reply = await this.backend.sendAndWait(
           buildCompactionBootstrapPrompt(summary, options),
         );
-        result = { summary, acknowledgement };
+        result = {
+          summary,
+          acknowledgement: reply,
+          ...(resumePrompt === undefined ? {} : { response: reply }),
+        };
       }
     } catch (error) {
       // The failure may have happened after New chat. Force a full initialization
@@ -116,7 +137,10 @@ export class CodingAgent {
       throw error;
     }
 
-    if (!result.acknowledgement.replaceAll("\\_", "_").includes("HARNESS_READY")) {
+    if (
+      resumePrompt === undefined &&
+      !result.acknowledgement.replaceAll("\\_", "_").includes("HARNESS_READY")
+    ) {
       await this.emit({
         type: "warning",
         message: "Copilot did not acknowledge the compacted coding conversation",
@@ -127,6 +151,18 @@ export class CodingAgent {
     this.newChatPrepared = false;
     this.activeSystemPrompt = systemPrompt;
     const after = this.backend.getTokenUsage?.();
+    // A summary that lands above the threshold would compact again on the very
+    // next step, spending a browser round trip per step for no relief.
+    if (after !== undefined && after.conversationTokens >= after.compactionThresholdTokens) {
+      this.skipNextCompaction = true;
+      await this.emit({
+        type: "warning",
+        message: `Compaction left usage at ~${after.conversationTokens.toLocaleString("en-US")} tokens, still at or above the ${after.compactionThresholdPercent}% threshold; skipping compaction on the next step to avoid thrashing`,
+        step,
+      });
+    } else {
+      this.skipNextCompaction = false;
+    }
     await this.emit({
       type: "compaction",
       phase: "complete",
@@ -142,6 +178,7 @@ export class CodingAgent {
     if (task.trim().length === 0) throw new Error("Agent task must not be empty");
     const tools = await this.availableTools();
     let prompt: string;
+    let promptCarriesSystemPrompt = false;
 
     if (!this.initialized) {
       if (!this.newChatPrepared) await this.backend.newChat();
@@ -152,25 +189,25 @@ export class CodingAgent {
         tools,
       });
       this.activeSystemPrompt = systemPrompt;
-      const acknowledgement = await this.backend.sendAndWait(
-        `<coding_harness_system>\n${systemPrompt}\n</coding_harness_system>\n\nThe local coding harness is now active. Reply with exactly HARNESS_READY and nothing else.`,
-      );
-      if (!acknowledgement.replaceAll("\\_", "_").includes("HARNESS_READY")) {
-        await this.emit({
-          type: "warning",
-          message: "Copilot did not return the expected harness initialization acknowledgement",
-          step: 0,
-        });
-      }
-      prompt = `<user_task>\n${task}\n</user_task>`;
+      // The system prompt rides along with the first task instead of costing a
+      // separate acknowledgement round trip; step 1's refusal correction catches
+      // a model that misread the protocol.
+      prompt = `<coding_harness_system>\n${systemPrompt}\n</coding_harness_system>\n\n<user_task>\n${task}\n</user_task>`;
+      promptCarriesSystemPrompt = true;
       this.initialized = true;
     } else {
       prompt = `<user_task>\n${task}\n</user_task>`;
     }
 
     for (let step = 1; step <= this.maxSteps; step += 1) {
-      await this.compactIfNeeded(prompt, step);
-      const response = await this.backend.sendAndWait(prompt);
+      // A prompt that already carries the system prompt opens a fresh chat, so
+      // compacting it would only re-send the same bootstrap context. Otherwise a
+      // compaction here carries the prompt with it and already holds the reply.
+      const resumed = promptCarriesSystemPrompt
+        ? undefined
+        : await this.compactIfNeeded(prompt, step);
+      promptCarriesSystemPrompt = false;
+      const response = resumed ?? (await this.backend.sendAndWait(prompt));
       const parsed = parseToolCalls(response);
 
       if (parsed.calls.length === 0 && parsed.errors.length === 0) {
@@ -255,14 +292,20 @@ export class CodingAgent {
     await this.onEvent?.(event);
   }
 
-  private async compactIfNeeded(nextPrompt: string, step: number): Promise<void> {
+  /** Returns the reply to `nextPrompt` when compaction carried it into the new chat. */
+  private async compactIfNeeded(nextPrompt: string, step: number): Promise<string | undefined> {
     if (
-      this.autoCompact &&
-      this.initialized &&
-      this.backend.needsCompaction?.(nextPrompt) === true
+      !this.autoCompact ||
+      !this.initialized ||
+      this.backend.needsCompaction?.(nextPrompt) !== true
     ) {
-      await this.compact(true, step);
+      return undefined;
     }
+    if (this.skipNextCompaction) {
+      this.skipNextCompaction = false;
+      return undefined;
+    }
+    return (await this.compact(true, step, nextPrompt)).response;
   }
 
   private looksLikeToolRefusal(response: string): boolean {

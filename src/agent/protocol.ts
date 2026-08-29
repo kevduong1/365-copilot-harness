@@ -94,5 +94,5 @@ export function formatToolResults(results: ToolResult[], protocolErrors: string[
     })),
     protocol_errors: protocolErrors,
   };
-  return `HARNESS_OBSERVATION\n${JSON.stringify(payload, null, 2)}\nEND_HARNESS_OBSERVATION\n\nContinue the coding task using this controller-provided observation. If more evidence or work is needed, print another HARNESS_REQUEST record. Otherwise, answer the user directly without protocol markers.`;
+  return `HARNESS_OBSERVATION\n${JSON.stringify(payload)}\nEND_HARNESS_OBSERVATION\n\nContinue: print another HARNESS_REQUEST if needed, otherwise answer without protocol markers.`;
 }

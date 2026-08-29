@@ -101,10 +101,38 @@ test("CopilotClient compaction summarizes, opens a new chat, and tracks only res
   assert.equal(result.acknowledged, true);
   assert.equal(adapter.newChats, 1);
   assert.match(adapter.prompts[1] ?? "", /standalone continuation summary/);
-  assert.match(adapter.prompts[2] ?? "", /<compacted_conversation_json>/);
+  assert.match(adapter.prompts[2] ?? "", /<compacted_conversation_summary>/);
   assert.match(adapter.prompts[2] ?? "", /initial question was answered/i);
+  assert.match(adapter.prompts[2] ?? "", /Reply with exactly COMPACTION_READY/);
+  assert.equal(result.response, undefined);
   assert.equal(result.after.messageCount, 2);
   assert.equal(client.getTokenUsage().conversationTokens, result.after.conversationTokens);
+});
+
+test("CopilotClient compaction folds a resume prompt into the bootstrap round trip", async () => {
+  const adapter = new FakeAdapter([
+    "Initial answer.",
+    "The user is auditing the client; the audit is still open.",
+    "Here is the audit result.",
+  ]);
+  const client = testClient(adapter);
+  await client.sendAndWait("Initial question");
+
+  const result = await client.compact({ resumePrompt: "<user_task>\nFinish the audit\n</user_task>" });
+  // One bootstrap message, no separate acknowledgement turn.
+  assert.equal(adapter.prompts.length, 3);
+  assert.equal(adapter.newChats, 1);
+  assert.match(adapter.prompts[2] ?? "", /<compacted_conversation_summary>/);
+  assert.match(adapter.prompts[2] ?? "", /Finish the audit/);
+  assert.doesNotMatch(adapter.prompts[2] ?? "", /Reply with exactly/);
+  assert.equal(result.response, "Here is the audit result.");
+  assert.equal(result.acknowledged, true);
+  // The combined bootstrap and its reply are both counted.
+  assert.equal(result.after.messageCount, 2);
+  assert.equal(
+    result.after.conversationTokens,
+    estimateMessageTokens(adapter.prompts[2] ?? "") + estimateMessageTokens("Here is the audit result."),
+  );
 });
 
 test("CopilotClient does not count a prompt that failed before producing a response", async () => {

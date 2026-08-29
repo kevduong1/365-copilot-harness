@@ -21,6 +21,7 @@ export interface LaunchOptions extends LoginOptions {
 }
 
 export interface CompactionResult extends ConversationCompactionResult {
+  /** True when the bootstrap was acknowledged, or when a resumePrompt made an acknowledgement unnecessary. */
   acknowledged: boolean;
   before: TokenUsageEstimate;
   after: TokenUsageEstimate;
@@ -122,14 +123,17 @@ export class CopilotClient {
 
       await this.adapter.newChat();
       this.tokenCounter.reset();
-      const acknowledgement = await this.trackedSendAndWait(
-        buildCompactionBootstrapPrompt(summary, options),
-      );
+      // With a resumePrompt the bootstrap carries real work, so its reply is the
+      // answer to that work rather than a readiness marker.
+      const reply = await this.trackedSendAndWait(buildCompactionBootstrapPrompt(summary, options));
       const readyMarker = options.readyMarker ?? DEFAULT_COMPACTION_READY_MARKER;
-      const acknowledged = acknowledgement.replaceAll("\\_", "_").includes(readyMarker);
+      const acknowledged =
+        options.resumePrompt !== undefined ||
+        reply.replaceAll("\\_", "_").includes(readyMarker);
       return {
         summary,
-        acknowledgement,
+        acknowledgement: reply,
+        ...(options.resumePrompt === undefined ? {} : { response: reply }),
         acknowledged,
         before,
         after: this.tokenCounter.usage(),
