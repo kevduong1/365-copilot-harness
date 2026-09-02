@@ -1,5 +1,11 @@
 export type { ChatAdapter } from "./adapter.js";
-export { CopilotClient, type CompactionResult, type LaunchOptions } from "./client.js";
+export {
+  CopilotClient,
+  CopilotTabSession,
+  type CompactionResult,
+  type LaunchOptions,
+} from "./client.js";
+export { ChatSession, type SessionOptions } from "./session.js";
 export {
   DEFAULT_COMPACTION_READY_MARKER,
   buildCompactionBootstrapPrompt,
@@ -23,6 +29,18 @@ export {
   type TokenUsageEstimate,
 } from "./tokens.js";
 export { CodingAgent, type AgentRunnerOptions } from "./agent/runner.js";
+export {
+  SUBAGENT_ROLE_CONTEXT,
+  SubagentManager,
+  createOrchestratorTools,
+  createSubagentTool,
+  type SubagentLifecycleEvent,
+  type SubagentManagerOptions,
+  type SubagentRecord,
+  type SubagentRun,
+  type SubagentSession,
+  type SubagentStatus,
+} from "./agent/subagent.js";
 export { buildAgentSystemPrompt, type SystemPromptOptions } from "./agent/system-prompt.js";
 export { createWorkspaceTools, type WorkspaceToolOptions } from "./agent/tools.js";
 export type {

@@ -26,6 +26,8 @@ export interface AgentRunnerOptions {
   onEvent?: (event: AgentEvent) => Promise<void> | void;
   tools?: ToolDefinition[];
   autoCompact?: boolean;
+  /** Additional system-prompt context, e.g. a subagent role preamble. */
+  systemPromptExtra?: string;
 }
 
 export class CodingAgent {
@@ -36,6 +38,7 @@ export class CodingAgent {
   private readonly confirmTool: ConfirmTool | undefined;
   private readonly onEvent: ((event: AgentEvent) => Promise<void> | void) | undefined;
   private readonly autoCompact: boolean;
+  private readonly systemPromptExtra: string | undefined;
   private tools: ToolDefinition[] | undefined;
   private activeSystemPrompt: string | undefined;
   private initialized = false;
@@ -54,6 +57,7 @@ export class CodingAgent {
     this.confirmTool = options.confirmTool;
     this.onEvent = options.onEvent;
     this.autoCompact = options.autoCompact ?? true;
+    this.systemPromptExtra = options.systemPromptExtra;
     this.tools = options.tools;
   }
 
@@ -85,13 +89,7 @@ export class CodingAgent {
   ): Promise<ConversationCompactionResult> {
     if (!this.initialized) throw new Error("There is no active coding conversation to compact");
     const tools = await this.availableTools();
-    const systemPrompt =
-      this.activeSystemPrompt ??
-      (await buildAgentSystemPrompt({
-        cwd: this.cwd,
-        allowedRoots: this.allowedRoots,
-        tools,
-      }));
+    const systemPrompt = this.activeSystemPrompt ?? (await this.buildSystemPrompt(tools));
     const before = this.backend.getTokenUsage?.();
     await this.emit({
       type: "compaction",
@@ -183,11 +181,7 @@ export class CodingAgent {
     if (!this.initialized) {
       if (!this.newChatPrepared) await this.backend.newChat();
       this.newChatPrepared = false;
-      const systemPrompt = await buildAgentSystemPrompt({
-        cwd: this.cwd,
-        allowedRoots: this.allowedRoots,
-        tools,
-      });
+      const systemPrompt = await this.buildSystemPrompt(tools);
       this.activeSystemPrompt = systemPrompt;
       // The system prompt rides along with the first task instead of costing a
       // separate acknowledgement round trip; step 1's refusal correction catches
@@ -237,8 +231,7 @@ export class CodingAgent {
       if (parsed.calls.length > calls.length) {
         parsed.errors.push(`Only the first ${calls.length} tool calls in one response are executed`);
       }
-      const results: ToolResult[] = [];
-      for (const call of calls) results.push(await this.executeTool(call, tools, step));
+      const results = await this.executeToolBatch(calls, tools, step);
 
       prompt = formatToolResults(results, parsed.errors);
     }
@@ -253,6 +246,40 @@ export class CodingAgent {
   private async availableTools(): Promise<ToolDefinition[]> {
     this.tools ??= await createWorkspaceTools(this.cwd, { allowedRoots: this.allowedRoots });
     return this.readOnly ? this.tools.filter((tool) => !tool.mutates) : this.tools;
+  }
+
+  private async buildSystemPrompt(tools: ToolDefinition[]): Promise<string> {
+    return buildAgentSystemPrompt({
+      cwd: this.cwd,
+      allowedRoots: this.allowedRoots,
+      tools,
+      ...(this.systemPromptExtra === undefined ? {} : { extra: this.systemPromptExtra }),
+    });
+  }
+
+  /**
+   * Execute one response's calls, preserving result order. Concurrency-safe
+   * tools (long-running subagents) run in parallel; everything else runs
+   * sequentially in the order it was printed.
+   */
+  private async executeToolBatch(
+    calls: ToolCall[],
+    tools: ToolDefinition[],
+    step: number,
+  ): Promise<ToolResult[]> {
+    const results = new Array<ToolResult>(calls.length);
+    const background = calls.map((call, index) => {
+      const definition = tools.find((tool) => tool.name === call.name);
+      if (definition?.concurrencySafe !== true) return undefined;
+      return this.executeTool(call, tools, step).then((result) => {
+        results[index] = result;
+      });
+    });
+    for (const [index, call] of calls.entries()) {
+      if (background[index] === undefined) results[index] = await this.executeTool(call, tools, step);
+    }
+    await Promise.all(background.filter((pending) => pending !== undefined));
+    return results;
   }
 
   private async executeTool(

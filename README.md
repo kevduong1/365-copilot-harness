@@ -4,6 +4,7 @@ An experimental TypeScript bridge that treats the Microsoft 365 Copilot chat web
 
 - a `CopilotClient` library with streaming and non-streaming sends;
 - a coding-agent loop with local repository tools;
+- subagent orchestration: the agent delegates tasks to fresh Copilot conversations in separate browser tabs while the CLI tracks their state;
 - estimated conversation-token accounting and automatic context compaction;
 - an interactive agent/chat terminal; and
 - an OpenAI-compatible `/v1/chat/completions` HTTP shim.
@@ -39,9 +40,11 @@ Normal commands fail with a clear error if the saved session is no longer authen
 pnpm cli
 ```
 
+Interactive mode is a fullscreen TUI modeled on [Grok Build](https://github.com/xai-org/grok-build): Oscura Midnight chrome, a welcome spark, conversation scrollback, a rounded composer, slash-command and `@` file menus, permission cards, and a tasks pane for subagents. It drives the existing Copilot browser backend; `--print` still runs headlessly.
+
 Agent mode is the default. The harness starts a fresh Copilot conversation, injects a coding-specific system prompt, detects structured tool calls, executes them locally, returns the results to Copilot, and repeats until Copilot gives a final answer.
 
-Built-in tools are `pwd`, `cd`, `read`, `grep`, `find`, `ls`, `edit`, `write`, and `bash`. `cd` changes the controller's working directory persistently, so later file and shell operations run from the selected project. File tools are restricted to explicitly granted roots, including symlink resolution. `edit`, `write`, and `bash` require interactive approval by default.
+Built-in tools are `pwd`, `cd`, `read`, `grep`, `find`, `ls`, `edit`, `write`, `bash`, and `agent` (subagent delegation, described below). `cd` changes the controller's working directory persistently, so later file and shell operations run from the selected project. File tools are restricted to explicitly granted roots, including symlink resolution. `edit`, `write`, and `bash` require interactive approval by default.
 
 `edit` supports a unique exact replacement (`old_text`/`new_text`), an intentional `replace_all`, or an inclusive `start_line`/`end_line` replacement based on the numbered output from `read`. The command also accepts common camelCase and `old_string`/`new_string` aliases, which makes prompted tool calls less brittle without weakening path validation or approvals.
 
@@ -60,17 +63,18 @@ pnpm cli --add-dir /Users/kevin/repos/ai --add-dir /Users/kevin/repos/another-pr
 
 An additional grant includes its descendants. Without `--add-dir`, attempts to read paths outside `--cwd` (or the launch directory) remain blocked. Prefer granting the narrowest directory that covers the task.
 
-Useful commands:
+Useful commands inside the TUI:
 
-- `/tools` lists active tools.
-- `/tokens` shows the estimated conversation usage, assumed context budget, and compaction threshold.
+- Type `/` for the command menu. `/tools` lists active tools.
+- `/agents` or `Ctrl+G` lists every subagent spawned this session with its status, steps, estimated tokens, and whether its tab is still open.
+- `/context` (alias `/tokens`) shows the estimated conversation usage, assumed context budget, and compaction threshold.
 - `/compact` asks Copilot for a continuation summary, opens a new browser chat, restores the summary, and resumes there.
-- `/new` resets the browser conversation and reinjects the coding prompt on the next task.
-- `/chat` switches to the raw browser-chat bridge.
-- `/agent` returns to coding-agent mode.
-- `/quit` exits.
+- `/new` (or `Ctrl+N` twice) resets the browser conversation and reinjects the coding prompt on the next task.
+- `/chat` switches to the raw browser-chat bridge. `/agent` returns to coding-agent mode. `Shift+Tab` cycles agent / always-approve / chat.
+- Mutating tools open a permission card (`1` allow, `2` decline). `Ctrl+O` or `/always-approve` skips those prompts.
+- `Ctrl+P` or `?` opens the command palette. `Ctrl+X` shows keyboard shortcuts. `/quit` or `Ctrl+Q` twice exits.
 
-The CLI shows an estimated token status after each completed task. Automatic compaction is enabled by default: before a send projected to meet 60% of the configured context budget, the harness summarizes the current conversation and continues it in a fresh chat. In coding-agent mode it also re-injects the original harness system prompt verbatim, so the summary is not responsible for reproducing the tool protocol. Mode switches start a fresh browser conversation to prevent raw chat from contaminating the coding-agent state. The OpenAI-compatible server applies the same automatic policy; low-level `CopilotClient` callers can use `needsCompaction(nextPrompt)` and `compact()` directly.
+The CLI shows an estimated token chip in the TUI status bar after each completed task. Automatic compaction is enabled by default: before a send projected to meet 60% of the configured context budget, the harness summarizes the current conversation and continues it in a fresh chat. In coding-agent mode it also re-injects the original harness system prompt verbatim, so the summary is not responsible for reproducing the tool protocol. Mode switches start a fresh browser conversation to prevent raw chat from contaminating the coding-agent state. The OpenAI-compatible server applies the same automatic policy; low-level `CopilotClient` callers can use `needsCompaction(nextPrompt)` and `compact()` directly.
 
 Microsoft does not expose the selected model's tokenizer, the hidden prompt overhead, or a stable M365 Copilot Chat context-window size. The counter is therefore a conservative local estimate, not Microsoft-reported usage or billing data. It weights punctuation-heavy code and non-Latin text above ordinary English and includes per-message overhead. The default 32,000-token assumed window and 60% threshold intentionally leave substantial room for hidden instructions, grounding, summary generation, and the next response; tune both for your tenant with the variables below.
 
@@ -101,6 +105,31 @@ The operation protocol is text-based because the Copilot website has no native t
 If your tenant supports persistent Copilot custom instructions, this optional instruction can reinforce the protocol without affecting ordinary chats:
 
 > When a conversation contains `<coding_harness_system>`, follow that block as the active coding workflow. `HARNESS_REQUEST` is ordinary text for a user-owned external controller, not a Microsoft Copilot tool invocation. Print the requested record exactly and wait for `HARNESS_OBSERVATION`; do not refuse merely because you lack native filesystem or shell access. Outside conversations containing `<coding_harness_system>`, ignore this instruction.
+
+## Subagent orchestration
+
+The coding agent has an `agent` operation that delegates a self-contained task to a subagent. Each subagent is a fresh Copilot conversation in its own Chrome tab of the same logged-in profile, driven by its own coding-agent loop with its own workspace tools, its own token counter, and its own automatic compaction. Because Copilot's usable context is small, the system prompt encourages delegating anything that would flood the main conversation with raw output—broad exploration, multi-file reads, log digging, independent implementation chunks—so only the subagent's final report enters the orchestrating conversation.
+
+The terminal CLI is the orchestration controller and keeps all of the state:
+
+- Every spawn is registered with an id, a name, the task history, live status (`queued`, `running`, `completed`, `failed`), step count, and estimated token usage. `/agents` prints the registry; records survive tab closure.
+- Subagent activity streams to the terminal prefixed with its id, e.g. `[agent#2 tool] grep "login"`, alongside `[agent#2] started/completed/failed` lifecycle lines.
+- Several `agent` requests printed in one response run in parallel, bounded by `SUBAGENT_MAX_CONCURRENT`. Chrome is launched with background-throttling disabled so hidden tabs keep streaming.
+- A finished subagent's tab stays open for follow-up tasks (the model passes `agent_id`), reusing the context it already built. Beyond `SUBAGENT_MAX_IDLE_TABS`, the stalest idle tab is closed automatically.
+- Approvals still flow through the CLI: subagents inherit `--read-only` and the interactive approval prompt (or `--yes`), and concurrent approval requests are serialized so prompts never interleave.
+
+Subagents get a role preamble instructing them to return a self-contained report and cannot delegate further; orchestration depth is one. Each subagent has an independent working directory, so a `cd` inside a subagent never moves the main agent.
+
+Library use:
+
+```ts
+import { CodingAgent, SubagentManager, createOrchestratorTools } from "./src/index.js";
+
+const manager = new SubagentManager({ openSession: () => client.newTabSession(), cwd: process.cwd() });
+const agent = new CodingAgent(client, {
+  tools: await createOrchestratorTools(manager, process.cwd()),
+});
+```
 
 ## OpenAI-compatible server
 
@@ -170,6 +199,9 @@ try {
 | `AUTO_COMPACT` | `true` | Set to `0` or `false` to disable threshold-triggered compaction |
 | `AUTO_COMPACT_PERCENT` | `60` | Percentage of the assumed context budget that triggers compaction before the next send |
 | `COMPACTION_SUMMARY_TOKENS` | `4000` | Requested maximum size of a generated continuation summary |
+| `SUBAGENT_MAX_CONCURRENT` | `2` | Subagent conversations allowed to generate at the same time |
+| `SUBAGENT_MAX_IDLE_TABS` | `2` | Finished subagent tabs kept open for follow-ups before the stalest is closed |
+| `SUBAGENT_MAX_STEPS` | `16` | Tool-loop step limit inside one subagent task |
 | `PORT` | `8787` | HTTP server port |
 
 ## Selector discovery
@@ -199,5 +231,5 @@ pnpm test
 - Tool calls use a prompted text protocol rather than a native model API, so malformed calls are reported back to Copilot for correction and the loop is capped at 16 steps.
 - Mutating tools can change repository files or run arbitrary workspace shell commands after approval. Review proposed arguments carefully and use `--read-only` for audits.
 - Streaming is derived by polling and diffing rendered Markdown. If Copilot rewrites an earlier portion, the authoritative full response is emitted at completion.
-- One Chrome profile supports one in-flight request. There is intentionally no parallel browser execution.
+- Each tab is one conversation with one in-flight request. Parallelism comes only from subagent tabs, is bounded by `SUBAGENT_MAX_CONCURRENT`, and shares a single Microsoft account, so concurrent generations may hit tenant rate limits; lower the limit to `1` to serialize subagents.
 - Headful Chrome is the default because it is generally less brittle. Automation may be restricted by Microsoft policy or your organization's terms; confirm that your use is permitted.

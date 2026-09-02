@@ -1,52 +1,41 @@
 import type { BrowserContext, Page } from "playwright";
 import type { ChatAdapter } from "./adapter.js";
 import { closeSession, ensureLoggedIn, openSession, type LoginOptions } from "./browser.js";
-import {
-  DEFAULT_COMPACTION_READY_MARKER,
-  buildCompactionBootstrapPrompt,
-  buildCompactionSummaryPrompt,
-  type ConversationCompactionOptions,
-  type ConversationCompactionResult,
-} from "./compaction.js";
-import { config } from "./config.js";
 import { M365CopilotAdapter } from "./copilot.js";
-import { Mutex } from "./queue.js";
-import { ConversationTokenCounter, type TokenUsageEstimate } from "./tokens.js";
+import { ChatSession, type SessionOptions } from "./session.js";
 
-export interface LaunchOptions extends LoginOptions {
-  contextWindowTokens?: number;
-  autoCompact?: boolean;
-  autoCompactPercent?: number;
-  compactionSummaryTokens?: number;
+export type { CompactionResult, SessionOptions } from "./session.js";
+
+export interface LaunchOptions extends LoginOptions, SessionOptions {}
+
+/**
+ * An additional Copilot conversation in its own tab of the shared logged-in
+ * Chrome window. Independent of the primary session: its own conversation,
+ * token counter, and single-flight mutex, so it can run while other tabs run.
+ */
+export class CopilotTabSession extends ChatSession {
+  constructor(
+    private readonly page: Page,
+    adapter: ChatAdapter,
+    options: SessionOptions = {},
+  ) {
+    super(adapter, options);
+  }
+
+  override async close(): Promise<void> {
+    if (!this.markClosed()) return;
+    await this.page.close();
+  }
 }
 
-export interface CompactionResult extends ConversationCompactionResult {
-  /** True when the bootstrap was acknowledged, or when a resumePrompt made an acknowledgement unnecessary. */
-  acknowledged: boolean;
-  before: TokenUsageEstimate;
-  after: TokenUsageEstimate;
-}
-
-export class CopilotClient {
-  private readonly mutex = new Mutex();
-  private readonly tokenCounter: ConversationTokenCounter;
-  private readonly autoCompact: boolean;
-  private readonly compactionSummaryTokens: number;
-  private closed = false;
-
+export class CopilotClient extends ChatSession {
   private constructor(
     private readonly context: BrowserContext,
     readonly page: Page,
-    private readonly adapter: ChatAdapter,
-    options: LaunchOptions,
+    adapter: ChatAdapter,
+    private readonly sessionOptions: LaunchOptions,
   ) {
-    this.tokenCounter = new ConversationTokenCounter({
-      contextWindowTokens: options.contextWindowTokens ?? config.contextWindowTokens,
-      compactionThresholdPercent: options.autoCompactPercent ?? config.autoCompactPercent,
-    });
-    this.autoCompact = options.autoCompact ?? config.autoCompact;
-    this.compactionSummaryTokens =
-      options.compactionSummaryTokens ?? config.compactionSummaryTokens;
+    super(adapter, sessionOptions);
   }
 
   static async launch(options: LaunchOptions = {}): Promise<CopilotClient> {
@@ -62,108 +51,27 @@ export class CopilotClient {
     }
   }
 
-  async *send(prompt: string): AsyncIterable<string> {
+  /**
+   * Open a fresh Copilot conversation in a new tab of the same browser,
+   * reusing the persistent profile's authentication. Close the returned
+   * session to close only that tab; closing the client closes every tab.
+   */
+  async newTabSession(): Promise<CopilotTabSession> {
     this.assertOpen();
-    const release = await this.mutex.acquire();
-    let completed = false;
-    let streamedResponse = "";
+    const page = await this.context.newPage();
     try {
-      for await (const delta of this.adapter.send(prompt)) {
-        streamedResponse += delta;
-        yield delta;
-      }
-      completed = true;
-    } finally {
-      const response = this.adapter.lastResponse?.() || streamedResponse;
-      if (completed || response) this.tokenCounter.record("user", prompt);
-      if (response) this.tokenCounter.record("assistant", response);
-      release();
-    }
-  }
-
-  sendAndWait(prompt: string): Promise<string> {
-    this.assertOpen();
-    return this.mutex.run(() => this.trackedSendAndWait(prompt));
-  }
-
-  newChat(): Promise<void> {
-    this.assertOpen();
-    return this.mutex.run(async () => {
-      await this.adapter.newChat();
-      this.tokenCounter.reset();
-    });
-  }
-
-  getTokenUsage(): TokenUsageEstimate {
-    this.assertOpen();
-    return this.tokenCounter.usage();
-  }
-
-  needsCompaction(nextPrompt = ""): boolean {
-    this.assertOpen();
-    return this.autoCompact && this.tokenCounter.needsCompaction(nextPrompt);
-  }
-
-  isAutoCompactionEnabled(): boolean {
-    this.assertOpen();
-    return this.autoCompact;
-  }
-
-  compact(options: ConversationCompactionOptions = {}): Promise<CompactionResult> {
-    this.assertOpen();
-    return this.mutex.run(async () => {
-      const before = this.tokenCounter.usage();
-      if (before.messageCount === 0) throw new Error("There is no tracked conversation to compact");
-
-      const maxSummaryTokens = options.maxSummaryTokens ?? this.compactionSummaryTokens;
-      const summary = (
-        await this.trackedSendAndWait(buildCompactionSummaryPrompt(maxSummaryTokens))
-      ).trim();
-      if (!summary) throw new Error("Copilot returned an empty conversation summary");
-
-      await this.adapter.newChat();
-      this.tokenCounter.reset();
-      // With a resumePrompt the bootstrap carries real work, so its reply is the
-      // answer to that work rather than a readiness marker.
-      const reply = await this.trackedSendAndWait(buildCompactionBootstrapPrompt(summary, options));
-      const readyMarker = options.readyMarker ?? DEFAULT_COMPACTION_READY_MARKER;
-      const acknowledged =
-        options.resumePrompt !== undefined ||
-        reply.replaceAll("\\_", "_").includes(readyMarker);
-      return {
-        summary,
-        acknowledgement: reply,
-        ...(options.resumePrompt === undefined ? {} : { response: reply }),
-        acknowledged,
-        before,
-        after: this.tokenCounter.usage(),
-      };
-    });
-  }
-
-  async close(): Promise<void> {
-    if (this.closed) return;
-    this.closed = true;
-    await closeSession(this.context);
-  }
-
-  private assertOpen(): void {
-    if (this.closed) throw new Error("CopilotClient is closed");
-  }
-
-  private async trackedSendAndWait(prompt: string): Promise<string> {
-    try {
-      const response = await this.adapter.sendAndWait(prompt);
-      this.tokenCounter.record("user", prompt);
-      if (response) this.tokenCounter.record("assistant", response);
-      return response;
+      await ensureLoggedIn(page);
+      const adapter = new M365CopilotAdapter(page);
+      await adapter.ensureReady();
+      return new CopilotTabSession(page, adapter, this.sessionOptions);
     } catch (error) {
-      const response = this.adapter.lastResponse?.() ?? "";
-      if (response) {
-        this.tokenCounter.record("user", prompt);
-        this.tokenCounter.record("assistant", response);
-      }
+      await page.close().catch(() => undefined);
       throw error;
     }
+  }
+
+  override async close(): Promise<void> {
+    if (!this.markClosed()) return;
+    await closeSession(this.context);
   }
 }

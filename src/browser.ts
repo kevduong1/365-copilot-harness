@@ -54,7 +54,14 @@ export async function openSession(): Promise<BrowserSession> {
     headless: config.headless,
     channel: "chrome",
     viewport: null,
-    args: ["--disable-blink-features=AutomationControlled"],
+    args: [
+      "--disable-blink-features=AutomationControlled",
+      // Subagent conversations stream in background tabs; Chrome must not
+      // throttle their timers or rendering while another tab has focus.
+      "--disable-background-timer-throttling",
+      "--disable-backgrounding-occluded-windows",
+      "--disable-renderer-backgrounding",
+    ],
   });
   await restoreSessionState(context);
   const page = context.pages()[0] ?? (await context.newPage());

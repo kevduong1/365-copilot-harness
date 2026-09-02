@@ -19,6 +19,17 @@ function positiveInteger(name: string, fallback: number): number {
   return value;
 }
 
+function nonNegativeInteger(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined) return fallback;
+
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`${name} must be a non-negative integer; received ${JSON.stringify(raw)}`);
+  }
+  return value;
+}
+
 function percentage(name: string, fallback: number): number {
   const value = positiveNumber(name, fallback);
   if (value > 100) throw new Error(`${name} must be at most 100; received ${value}`);
@@ -55,6 +66,9 @@ export const config = {
   autoCompact: booleanFlag("AUTO_COMPACT", true),
   autoCompactPercent: percentage("AUTO_COMPACT_PERCENT", 60),
   compactionSummaryTokens: positiveInteger("COMPACTION_SUMMARY_TOKENS", 4_000),
+  subagentMaxConcurrent: positiveInteger("SUBAGENT_MAX_CONCURRENT", 2),
+  subagentMaxIdleTabs: nonNegativeInteger("SUBAGENT_MAX_IDLE_TABS", 2),
+  subagentMaxSteps: positiveInteger("SUBAGENT_MAX_STEPS", 16),
   serverPort: port("PORT", 8787),
 } as const;
 

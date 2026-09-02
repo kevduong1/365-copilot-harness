@@ -33,6 +33,11 @@ export interface ToolDefinition {
    */
   parameters: string;
   mutates: boolean;
+  /**
+   * True for long-running tools whose calls are independent of every other
+   * call in the same response, letting the runner execute them in parallel.
+   */
+  concurrencySafe?: boolean;
   execute(arguments_: Record<string, unknown>): Promise<string>;
 }
 

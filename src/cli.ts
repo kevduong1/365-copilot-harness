@@ -1,13 +1,18 @@
 #!/usr/bin/env node
-import { createInterface, type Interface } from "node:readline/promises";
 import { stdin, stdout, stderr } from "node:process";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { CodingAgent } from "./agent/runner.js";
+import {
+  SubagentManager,
+  createOrchestratorTools,
+  type SubagentLifecycleEvent,
+  type SubagentRecord,
+} from "./agent/subagent.js";
 import type { AgentEvent, ToolCall, ToolDefinition } from "./agent/types.js";
 import { CopilotClient } from "./client.js";
 import { ResponseTimeoutError } from "./errors.js";
-import type { TokenUsageEstimate } from "./tokens.js";
+import { runTui } from "./tui/index.js";
 
 interface CliOptions {
   command: "help" | "login" | "interactive" | "print";
@@ -81,6 +86,8 @@ function printHelp(): void {
   pnpm cli [--cwd DIR] [--add-dir DIR ...] [--read-only] [--yes]
   pnpm cli [options] --print "TASK"
 
+Interactive sessions use a fullscreen TUI (requires a TTY). Use --print for scripts.
+
 Options:
   --cwd DIR       Start the coding agent in DIR; DIR becomes an allowed root
   --add-dir DIR   Grant access to an additional root and its descendants (repeatable)
@@ -122,185 +129,95 @@ function displayedError(error: unknown): string {
     : `${error.name}: ${error.message}`;
 }
 
-function eventPrinter(destination: NodeJS.WritableStream): (event: AgentEvent) => void {
+function eventPrinter(
+  destination: NodeJS.WritableStream,
+  label = "",
+): (event: AgentEvent) => void {
+  const tag = (kind: string): string => (label === "" ? `[${kind}]` : `[${label} ${kind}]`);
   return (event) => {
     if (event.type === "tool_start") {
-      destination.write(`\n[tool] ${callSummary(event.call)}\n`);
+      destination.write(`\n${tag("tool")} ${callSummary(event.call)}\n`);
     } else if (event.type === "tool_end") {
       destination.write(
-        `${event.result.ok ? "[ok]" : "[error]"} ${displayedOutput(event.result.output)}\n`,
+        `${event.result.ok ? tag("ok") : tag("error")} ${displayedOutput(event.result.output)}\n`,
       );
     } else if (event.type === "warning") {
-      destination.write(`[warning] ${event.message}\n`);
+      destination.write(`${tag("warning")} ${event.message}\n`);
     } else if (event.type === "compaction" && event.phase === "start") {
       const usage = event.before;
       const amount = usage === undefined ? "" : ` at ~${usage.conversationTokens.toLocaleString("en-US")} tokens`;
       destination.write(
-        `[compaction] ${event.automatic ? "Auto-compacting" : "Compacting"}${amount}; summarizing into a new browser chat...\n`,
+        `${tag("compaction")} ${event.automatic ? "Auto-compacting" : "Compacting"}${amount}; summarizing into a new browser chat...\n`,
       );
     } else if (event.type === "compaction" && event.phase === "complete") {
       const usage = event.after;
       const amount = usage === undefined ? "" : ` (~${usage.conversationTokens.toLocaleString("en-US")} tokens retained)`;
-      destination.write(`[compaction] Continued in a new browser chat${amount}.\n`);
+      destination.write(`${tag("compaction")} Continued in a new browser chat${amount}.\n`);
     }
   };
 }
 
-function tokenStatus(usage: TokenUsageEstimate, autoCompact: boolean): string {
-  const threshold = autoCompact
-    ? `auto-compact at ${usage.compactionThresholdPercent}%`
-    : "auto-compaction disabled";
-  return `[tokens] ~${usage.conversationTokens.toLocaleString("en-US")} / ${usage.contextWindowTokens.toLocaleString("en-US")} (${usage.usagePercent.toFixed(1)}% estimated; ${threshold})`;
+function taskSummary(task: string, maximum = 80): string {
+  const flattened = task.replaceAll(/\s+/g, " ").trim();
+  return flattened.length <= maximum ? flattened : `${flattened.slice(0, maximum)}…`;
 }
 
-function approvalPrompt(
-  readline: Interface,
-  autoApprove: boolean,
-): (call: ToolCall, definition: ToolDefinition) => Promise<boolean> {
-  return async (call, definition) => {
-    if (autoApprove) return true;
-    const answer = await readline.question(
-      `\nAllow ${definition.name} (${definition.description})?\n${JSON.stringify(call.arguments, null, 2)}\n[y/N] `,
-    );
-    return /^y(?:es)?$/i.test(answer.trim());
+function subagentTokens(record: SubagentRecord): string {
+  return record.tokenUsage === undefined
+    ? ""
+    : `, ~${record.tokenUsage.conversationTokens.toLocaleString("en-US")} tokens`;
+}
+
+function lifecyclePrinter(
+  destination: NodeJS.WritableStream,
+): (record: SubagentRecord, event: SubagentLifecycleEvent) => void {
+  return (record, event) => {
+    const label = `[agent#${record.id}]`;
+    if (event === "started") {
+      destination.write(`\n${label} ${record.name} started: ${taskSummary(record.tasks.at(-1) ?? "")}\n`);
+    } else if (event === "completed") {
+      destination.write(
+        `${label} ${record.name} completed in ${record.steps} step${record.steps === 1 ? "" : "s"}${subagentTokens(record)}\n`,
+      );
+    } else if (event === "failed") {
+      destination.write(`${label} ${record.name} failed: ${record.lastError ?? "unknown error"}\n`);
+    }
   };
 }
 
-async function interactive(options: CliOptions): Promise<void> {
-  const client = await CopilotClient.launch();
-  const readline = createInterface({ input: stdin, output: stdout });
-  let closing = false;
-  let agentMode = !options.rawChat;
-  const agent = new CodingAgent(client, {
+function createSubagentManager(
+  client: CopilotClient,
+  options: CliOptions,
+  confirmTool: (call: ToolCall, definition: ToolDefinition) => Promise<boolean>,
+  destination: NodeJS.WritableStream,
+): SubagentManager {
+  const lifecycle = lifecyclePrinter(destination);
+  return new SubagentManager({
+    openSession: () => client.newTabSession(),
     cwd: options.cwd,
     allowedRoots: options.allowedRoots,
     readOnly: options.readOnly,
-    confirmTool: approvalPrompt(readline, options.autoApprove),
-    onEvent: eventPrinter(stdout),
+    confirmTool,
+    onEvent: (record, event) => eventPrinter(destination, `agent#${record.id}`)(event),
+    onLifecycle: lifecycle,
   });
-  if (!agentMode) await client.newChat();
+}
 
-  const close = async (): Promise<void> => {
-    if (closing) return;
-    closing = true;
-    readline.close();
-    await client.close();
-  };
-  process.once("SIGINT", () => void close());
-  process.once("SIGTERM", () => void close());
+function approvalPrompt(autoApprove: boolean): (call: ToolCall, definition: ToolDefinition) => Promise<boolean> {
+  return async () => autoApprove;
+}
 
-  console.log(
-    `M365 Copilot coding harness (${agentMode ? "agent" : "chat"} mode${options.readOnly ? ", read-only" : ""}).`,
-  );
-  console.log(`Working directory: ${options.cwd}`);
-  if (options.allowedRoots.length > 0) {
-    console.log(`Additional allowed roots: ${options.allowedRoots.join(", ")}`);
+async function interactive(options: CliOptions): Promise<void> {
+  if (!stdin.isTTY || !stdout.isTTY) {
+    throw new Error("Interactive mode requires a TTY. Use --print for non-interactive runs.");
   }
-  console.log("Commands: /agent, /chat, /tools, /tokens, /compact, /new, /help, /quit");
-
-  try {
-    while (!closing) {
-      let answer: string;
-      try {
-        answer = await readline.question("\n> ");
-      } catch (error) {
-        if (closing) break;
-        throw error;
-      }
-      const prompt = answer.trim();
-      if (!prompt) continue;
-      if (prompt === "/quit" || prompt === "/exit") break;
-      if (prompt === "/help") {
-        console.log("Agent mode executes structured local tools. Chat mode sends raw prompts without tools.");
-        console.log("Mutating tools ask for approval unless the CLI was started with --yes.");
-        console.log("Token counts are estimates; /compact summarizes into a fresh browser chat.");
-        continue;
-      }
-      if (prompt === "/agent") {
-        if (agentMode) {
-          console.log("Agent mode is already enabled.");
-          continue;
-        }
-        agentMode = true;
-        console.log("Agent mode enabled. Its first task starts a fresh coding conversation.");
-        continue;
-      }
-      if (prompt === "/chat") {
-        if (!agentMode) {
-          console.log("Raw chat mode is already enabled.");
-          continue;
-        }
-        await client.newChat();
-        agent.invalidate();
-        agentMode = false;
-        console.log("Raw chat mode enabled in a fresh conversation.");
-        continue;
-      }
-      if (prompt === "/tools") {
-        console.log((await agent.toolNames()).join(", "));
-        continue;
-      }
-      if (prompt === "/tokens") {
-        console.log(tokenStatus(client.getTokenUsage(), client.isAutoCompactionEnabled()));
-        continue;
-      }
-      if (prompt === "/compact") {
-        try {
-          if (client.getTokenUsage().messageCount === 0) {
-            console.log("There is no conversation to compact.");
-          } else if (agentMode) {
-            await agent.compact();
-            console.log(tokenStatus(client.getTokenUsage(), client.isAutoCompactionEnabled()));
-          } else {
-            const result = await client.compact();
-            if (!result.acknowledged) {
-              console.warn("[warning] Copilot did not acknowledge the compacted conversation.");
-            }
-            console.log(
-              `[compaction] Continued in a new browser chat (~${result.after.conversationTokens.toLocaleString("en-US")} tokens retained).`,
-            );
-            console.log(tokenStatus(result.after, client.isAutoCompactionEnabled()));
-          }
-        } catch (error) {
-          console.error(`\n${displayedError(error)}`);
-        }
-        continue;
-      }
-      if (prompt === "/new") {
-        if (agentMode) await agent.reset();
-        else await client.newChat();
-        console.log("Started a new conversation.");
-        console.log(tokenStatus(client.getTokenUsage(), client.isAutoCompactionEnabled()));
-        continue;
-      }
-
-      try {
-        if (agentMode) {
-          const result = await agent.run(prompt);
-          stdout.write(`\n${result}\n`);
-        } else {
-          if (client.needsCompaction(prompt)) {
-            const before = client.getTokenUsage();
-            console.log(
-              `[compaction] Auto-compacting at ~${before.conversationTokens.toLocaleString("en-US")} tokens; summarizing into a new browser chat...`,
-            );
-            const compacted = await client.compact();
-            if (!compacted.acknowledged) {
-              console.warn("[warning] Copilot did not acknowledge the compacted conversation.");
-            }
-          }
-          stdout.write("\n");
-          for await (const delta of client.send(prompt)) stdout.write(delta);
-          stdout.write("\n");
-        }
-        console.log(tokenStatus(client.getTokenUsage(), client.isAutoCompactionEnabled()));
-      } catch (error) {
-        console.error(`\n${displayedError(error)}`);
-      }
-    }
-  } finally {
-    await close();
-  }
+  await runTui({
+    autoApprove: options.autoApprove,
+    readOnly: options.readOnly,
+    rawChat: options.rawChat,
+    cwd: options.cwd,
+    allowedRoots: options.allowedRoots,
+  });
 }
 
 async function print(options: CliOptions): Promise<void> {
@@ -321,12 +238,15 @@ async function print(options: CliOptions): Promise<void> {
     }
     return;
   }
+  const confirmTool = approvalPrompt(options.autoApprove);
+  const manager = createSubagentManager(client, options, confirmTool, stderr);
   const agent = new CodingAgent(client, {
     cwd: options.cwd,
     allowedRoots: options.allowedRoots,
     readOnly: options.readOnly,
-    confirmTool: async () => options.autoApprove,
+    confirmTool,
     onEvent: eventPrinter(stderr),
+    tools: await createOrchestratorTools(manager, options.cwd, options.allowedRoots),
   });
   try {
     stdout.write(`${await agent.run(task)}\n`);
