@@ -174,6 +174,7 @@ export type Effect =
   | { type: "login" }
   | { type: "approve"; id: number; allow: boolean }
   | { type: "listTools" }
+  | { type: "listSkills" }
   | { type: "refreshAgents" }
   | { type: "toast"; message: string };
 

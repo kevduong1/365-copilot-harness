@@ -660,6 +660,19 @@ export function runSlash(state: TuiState, name: string, args: string): DispatchR
       };
     case "tools":
       return { state, effects: [{ type: "listTools" }] };
+    case "skills":
+      return { state, effects: [{ type: "listSkills" }] };
+    case "skill": {
+      const [skillName, ...rest] = args.trim().split(/\s+/).filter(Boolean);
+      if (skillName === undefined) {
+        return { state, effects: [{ type: "toast", message: "Usage: /skill <name> [request]" }] };
+      }
+      if (state.sessionKind !== "agent") {
+        return { state, effects: [{ type: "toast", message: "Skills need agent mode; run /agent first." }] };
+      }
+      const request = rest.join(" ");
+      return enqueueOrSend(state, skillPrompt(skillName, request));
+    }
     case "agents":
       return openOverlay(state, "tasks", [{ type: "refreshAgents" }]);
     case "always-approve":
@@ -680,6 +693,12 @@ export function runSlash(state: TuiState, name: string, args: string): DispatchR
     default:
       return { state, effects: [{ type: "toast", message: `Unknown command: /${name}` }] };
   }
+}
+
+/** The user message sent by `/skill <name> [request]`. */
+export function skillPrompt(name: string, request: string): string {
+  const instruction = `Use the "${name}" skill: load it with the skill operation, then follow its instructions.`;
+  return request.trim().length === 0 ? instruction : `${instruction}\n\n${request.trim()}`;
 }
 
 function appendSystem(state: TuiState, message: string): TuiState {

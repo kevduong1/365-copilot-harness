@@ -600,6 +600,7 @@ function overlayLines(state: TuiState): string[] {
       "Mutating tools ask unless always-approve is on.",
       "Token counts are local estimates; /compact starts a new chat.",
       "Subagents run in extra Chrome tabs; /agents lists them.",
+      "Skills in .github/skills or ~/.copilot/skills load on demand; /skills lists them.",
       "",
       ...filterCommands("").map((command) => `/${command.name.padEnd(16)} ${command.description}`),
     ];

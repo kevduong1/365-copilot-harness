@@ -3,7 +3,7 @@ import test from "node:test";
 import { ScreenBuffer } from "../src/tui/buffer.js";
 import { filterCommands, findCommand } from "../src/tui/commands.js";
 import { activeCompletion, syncCompletion } from "../src/tui/completion.js";
-import { dispatch, runSlash } from "../src/tui/dispatch.js";
+import { dispatch, runSlash, skillPrompt } from "../src/tui/dispatch.js";
 import {
   blendHex,
   contextGradientHex,
@@ -211,6 +211,13 @@ test("dispatch runSlash covers the harness commands without touching the backend
   assert.equal(runSlash(state, "compact", "").effects[0]?.type, "compact");
   assert.equal(runSlash(state, "chat", "").effects[0]?.type, "newChat");
   assert.equal(runSlash(state, "tools", "").effects[0]?.type, "listTools");
+  assert.equal(runSlash(state, "skills", "").effects[0]?.type, "listSkills");
+  assert.equal(runSlash(state, "skill", "").effects[0]?.type, "toast");
+  const skill = runSlash(state, "skill", "deploy to staging");
+  assert.equal(skill.effects[0]?.type, "send");
+  assert.equal(skill.effects[0]?.type === "send" ? skill.effects[0].text : "", skillPrompt("deploy", "to staging"));
+  assert.match(skillPrompt("deploy", "to staging"), /Use the "deploy" skill[\s\S]*\n\nto staging$/);
+  assert.equal(findCommand("/use")?.name, "skill");
   assert.equal(runSlash(state, "always-approve", "").state.permission, "always");
   const renamed = runSlash(state, "rename", "Auth work");
   assert.equal(renamed.state.title, "Auth work");

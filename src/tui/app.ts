@@ -102,6 +102,28 @@ export async function runTui(options: TuiOptions): Promise<void> {
           );
         });
       }
+      if (effect.type === "listSkills") {
+        let message: string;
+        try {
+          message = await harness.listSkills();
+        } catch (error) {
+          message = displayedError(error);
+        }
+        setState((current) => {
+          const id = current.nextEntryId;
+          return applyToast(
+            {
+              ...current,
+              nextEntryId: id + 1,
+              entries: [
+                ...current.entries,
+                { id, createdAt: Date.now(), kind: "system", message, collapsed: false, raw: false },
+              ],
+            },
+            "Skills listed.",
+          );
+        });
+      }
       if (effect.type === "refreshAgents") harness.refreshAgents();
       if (effect.type === "login") {
         if (getState().ready) setState((current) => applyToast(current, "Already signed in."));

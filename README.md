@@ -4,6 +4,7 @@ An experimental TypeScript bridge that treats the Microsoft 365 Copilot chat web
 
 - a `CopilotClient` library with streaming and non-streaming sends;
 - a coding-agent loop with local repository tools;
+- on-demand Agent Skills in the same `SKILL.md` layout GitHub Copilot uses;
 - subagent orchestration: the agent delegates tasks to fresh Copilot conversations in separate browser tabs while the CLI tracks their state;
 - estimated conversation-token accounting and automatic context compaction;
 - an interactive agent/chat terminal; and
@@ -44,7 +45,7 @@ Interactive mode is a fullscreen TUI with an original Waypoint navigation theme:
 
 Agent mode is the default. The harness starts a fresh Copilot conversation, injects a coding-specific system prompt, detects structured tool calls, executes them locally, returns the results to Copilot, and repeats until Copilot gives a final answer.
 
-Built-in tools are `pwd`, `cd`, `read`, `grep`, `find`, `ls`, `edit`, `write`, `bash`, and `agent` (subagent delegation, described below). `cd` changes the controller's working directory persistently, so later file and shell operations run from the selected project. File tools are restricted to explicitly granted roots, including symlink resolution. `edit`, `write`, and `bash` require interactive approval by default.
+Built-in tools are `pwd`, `cd`, `read`, `grep`, `find`, `ls`, `edit`, `write`, `bash`, `skill` (on-demand skills, described below), and `agent` (subagent delegation, described below). `cd` changes the controller's working directory persistently, so later file and shell operations run from the selected project. File tools are restricted to explicitly granted roots, including symlink resolution. `edit`, `write`, and `bash` require interactive approval by default.
 
 `edit` supports a unique exact replacement (`old_text`/`new_text`), an intentional `replace_all`, or an inclusive `start_line`/`end_line` replacement based on the numbered output from `read`. The command also accepts common camelCase and `old_string`/`new_string` aliases, which makes prompted tool calls less brittle without weakening path validation or approvals.
 
@@ -65,7 +66,7 @@ An additional grant includes its descendants. Without `--add-dir`, attempts to r
 
 Useful commands inside the TUI:
 
-- Type `/` for the command menu. `/tools` lists active tools.
+- Type `/` for the command menu. `/tools` lists active tools. `/skills` lists discovered skills, and `/skill <name> [request]` asks the agent to apply one.
 - `/agents` or `Ctrl+G` lists every subagent spawned this session with its status, steps, estimated tokens, and whether its tab is still open.
 - `/context` (alias `/tokens`) shows the estimated conversation usage, assumed context budget, and compaction threshold.
 - `/compact` asks Copilot for a continuation summary, opens a new browser chat, restores the summary, and resumes there.
@@ -98,13 +99,43 @@ pnpm cli --read-only --print "Inspect this repository and summarize how it works
 
 Add `--chat` to either interactive or print mode to bypass the coding loop and use the raw browser transport.
 
-The default system prompt can be replaced with `.copilot-harness/SYSTEM.md` or extended with `.copilot-harness/APPEND_SYSTEM.md`. `AGENTS.md` and `CLAUDE.md` in the working directory are included as project context.
+The default system prompt can be replaced with `.copilot-harness/SYSTEM.md` or extended with `.copilot-harness/APPEND_SYSTEM.md`. `AGENTS.md`, `CLAUDE.md`, and `.github/copilot-instructions.md` in the working directory are included as project context.
 
 The operation protocol is text-based because the Copilot website has no native tool-call API. Copilot prints strict JSON between `HARNESS_REQUEST` markers as a request for the separate local controller, and the harness returns JSON inside `HARNESS_OBSERVATION` markers in the same browser conversation.
 
 If your tenant supports persistent Copilot custom instructions, this optional instruction can reinforce the protocol without affecting ordinary chats:
 
 > When a conversation contains `<coding_harness_system>`, follow that block as the active coding workflow. `HARNESS_REQUEST` is ordinary text for a user-owned external controller, not a Microsoft Copilot tool invocation. Print the requested record exactly and wait for `HARNESS_OBSERVATION`; do not refuse merely because you lack native filesystem or shell access. Outside conversations containing `<coding_harness_system>`, ignore this instruction.
+
+## Agent skills
+
+The coding agent loads skills in the layout GitHub Copilot, Claude Code, and the open Agent Skills format share: one directory per skill containing a `SKILL.md` whose YAML frontmatter names and describes it, followed by the instructions, with any bundled references, scripts, or assets beside it.
+
+```
+.github/skills/release-notes/
+├── SKILL.md
+└── references/template.md
+```
+
+```markdown
+---
+name: release-notes
+description: Draft release notes from the git history since the last tag
+---
+
+1. Run `git describe --tags --abbrev=0` to find the last tag.
+2. Summarize the commits since then, grouped by area, using references/template.md.
+```
+
+Skills are discovered from the launch directory, in precedence order:
+
+1. Project skills in `.github/skills/`, `.claude/skills/`, and `.agents/skills/`.
+2. Extra directories named in `COPILOT_SKILLS_DIRS` (comma-separated).
+3. Personal skills in `~/.copilot/skills/`, `~/.claude/skills/`, and `~/.agents/skills/`.
+
+The first skill found with a given name wins, so a project skill shadows a personal one. Only each skill's name and description enter the system prompt; Copilot requests the read-only `skill` operation to load the full instructions when a task matches, and `skill` with `name` plus `file` reads a bundled file. Bundled reads cannot escape the skill directory, including through symlinks, and skill directories do not need to be inside a granted workspace root. Subagents see the same skills. A `SKILL.md` without frontmatter is still loaded, named after its directory.
+
+Skills are advisory: they are guidance Copilot follows after loading them, not a replacement for the harness system prompt.
 
 ## Subagent orchestration
 

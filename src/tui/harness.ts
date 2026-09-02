@@ -1,5 +1,6 @@
 import { homedir } from "node:os";
 import { CodingAgent } from "../agent/runner.js";
+import { discoverSkills, formatSkillList } from "../agent/skills.js";
 import {
   SubagentManager,
   createOrchestratorTools,
@@ -220,6 +221,11 @@ export class TuiHarness {
       this.setState((state) => ({ ...state, turn: "idle" }));
       this.syncUsage();
     }
+  }
+
+  /** Skills visible from the launch directory, formatted for the scrollback. */
+  async listSkills(): Promise<string> {
+    return formatSkillList(await discoverSkills(this.cwd));
   }
 
   async refreshTools(): Promise<void> {

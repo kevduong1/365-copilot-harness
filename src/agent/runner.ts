@@ -5,6 +5,7 @@ import {
   type ConversationCompactionResult,
 } from "../compaction.js";
 import { config } from "../config.js";
+import { discoverSkills } from "./skills.js";
 import { buildAgentSystemPrompt } from "./system-prompt.js";
 import { formatToolResults, parseToolCalls } from "./protocol.js";
 import { createWorkspaceTools } from "./tools.js";
@@ -249,10 +250,12 @@ export class CodingAgent {
   }
 
   private async buildSystemPrompt(tools: ToolDefinition[]): Promise<string> {
+    const skills = tools.some((tool) => tool.name === "skill") ? await discoverSkills(this.cwd) : [];
     return buildAgentSystemPrompt({
       cwd: this.cwd,
       allowedRoots: this.allowedRoots,
       tools,
+      skills,
       ...(this.systemPromptExtra === undefined ? {} : { extra: this.systemPromptExtra }),
     });
   }

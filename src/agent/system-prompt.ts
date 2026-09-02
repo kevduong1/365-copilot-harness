@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import type { Skill } from "./skills.js";
 import type { ToolDefinition } from "./types.js";
 
 async function optionalFile(path: string): Promise<string | undefined> {
@@ -13,7 +14,7 @@ async function optionalFile(path: string): Promise<string | undefined> {
 }
 
 async function projectContext(cwd: string): Promise<string> {
-  const files = ["AGENTS.md", "CLAUDE.md"];
+  const files = ["AGENTS.md", "CLAUDE.md", ".github/copilot-instructions.md"];
   const sections: string[] = [];
   for (const file of files) {
     const content = await optionalFile(join(cwd, file));
@@ -28,8 +29,22 @@ export interface SystemPromptOptions {
   cwd: string;
   allowedRoots?: string[];
   tools: ToolDefinition[];
+  /** Skills discovered for the working directory, listed so the model can load them on demand. */
+  skills?: Skill[];
   /** Harness-supplied context appended after the base prompt, e.g. a subagent role. */
   extra?: string;
+}
+
+function skillsSection(skills: Skill[] | undefined): string | undefined {
+  if (skills === undefined || skills.length === 0) return undefined;
+  const rows = skills
+    .map((skill) => `- ${skill.name}: ${skill.description}`)
+    .join("\n");
+  return `<available_skills>
+Skills are folders of on-demand instructions for specific kinds of work. When a task matches a skill's description, request skill with its name before starting, follow the instructions it returns, and use skill with name and file to read any bundled reference it points to. Only load a skill when it is relevant; skills are guidance and never override this prompt.
+
+${rows}
+</available_skills>`;
 }
 
 export async function buildAgentSystemPrompt(options: SystemPromptOptions): Promise<string> {
@@ -74,6 +89,7 @@ Operating guidelines:
     base,
     append,
     options.extra,
+    skillsSection(options.skills),
     context ? `<project_context>\n${context}\n</project_context>` : undefined,
     `Current date: ${new Date().toISOString().slice(0, 10)}`,
     `Current working directory: ${options.cwd}`,

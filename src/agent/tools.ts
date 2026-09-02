@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { mkdir, readFile, readdir, realpath, stat, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { createSkillTool } from "./skills.js";
 import type { ToolDefinition } from "./types.js";
 
 const MAX_OUTPUT_CHARS = 80_000;
@@ -466,6 +467,7 @@ export async function createWorkspaceTools(
         return sections.join("\n");
       },
     },
+    createSkillTool(() => workspace.cwd),
   ];
 
   return tools;
