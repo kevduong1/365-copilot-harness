@@ -2,22 +2,31 @@ import { execFileSync } from "node:child_process";
 import { stdout, stdin } from "node:process";
 import { theme } from "./theme.js";
 import type { ScreenBuffer } from "./buffer.js";
+import { terminalCapabilities, type TerminalCapabilities } from "./capabilities.js";
 
 const ENTER =
-  "\x1b[?1049h\x1b[?25l\x1b[?7l\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?2004h\x1b[>4;1m";
+  "\x1b[?1049h\x1b[?25l\x1b[?7l\x1b[?1000h\x1b[?1003h\x1b[?1006h\x1b[?2004h\x1b[>4;1m";
 const LEAVE =
-  "\x1b[>4;0m\x1b[?2004l\x1b[?1006l\x1b[?1002l\x1b[?1000l\x1b[?7h\x1b[?25h\x1b[?1049l\x1b]111\x1b\\\x1b]112\x1b\\";
+  "\x1b[>4;0m\x1b[?2004l\x1b[?1006l\x1b[?1003l\x1b[?1000l\x1b[?7h\x1b[?25h\x1b[?1049l\x1b]111\x1b\\\x1b]112\x1b\\";
 
 export class Terminal {
   private previous: ScreenBuffer | undefined;
   private restored = false;
+  readonly capabilities: TerminalCapabilities;
+
+  constructor(env: NodeJS.ProcessEnv = process.env) {
+    this.capabilities = terminalCapabilities(env);
+  }
 
   start(): void {
     stdin.setRawMode?.(true);
     stdin.resume();
     stdin.setEncoding("utf8");
     stdout.write(ENTER);
-    stdout.write(`\x1b]11;${theme.bgBase}\x1b\\\x1b]12;${theme.accentUser}\x1b\\`);
+    if (this.capabilities.colorMode !== "none") {
+      const background = this.capabilities.defaultBackground === true ? "" : `\x1b]11;${theme.bgBase}\x1b\\`;
+      stdout.write(`${background}\x1b]12;${theme.accentUser}\x1b\\`);
+    }
   }
 
   size(): { cols: number; rows: number } {

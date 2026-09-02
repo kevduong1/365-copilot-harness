@@ -30,8 +30,8 @@ export interface KeyEvent {
 
 export interface MouseEvent {
   type: "mouse";
-  kind: "down" | "up" | "drag" | "scroll";
-  button: "left" | "middle" | "right" | "wheelup" | "wheeldown";
+  kind: "down" | "up" | "move" | "drag" | "scroll";
+  button: "none" | "left" | "middle" | "right" | "wheelup" | "wheeldown";
   x: number;
   y: number;
   ctrl: boolean;
@@ -202,8 +202,9 @@ export class InputParser {
     const low = btn & 3;
     const wheel = (btn & 64) !== 0;
     let kind: MouseEvent["kind"] = suffix === "m" ? "up" : "down";
-    if ((btn & 32) !== 0) kind = "drag";
-    let button: MouseEvent["button"] = low === 0 ? "left" : low === 1 ? "middle" : "right";
+    if ((btn & 32) !== 0) kind = low === 3 ? "move" : "drag";
+    let button: MouseEvent["button"] =
+      low === 0 ? "left" : low === 1 ? "middle" : low === 2 ? "right" : "none";
     if (wheel) {
       kind = "scroll";
       button = (btn & 1) === 1 ? "wheeldown" : "wheelup";

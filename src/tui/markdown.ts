@@ -1,7 +1,7 @@
 import { syntax, theme, type Theme } from "./theme.js";
 import type { Style } from "./buffer.js";
 import { wrapText } from "./format.js";
-import { glyphs } from "./glyphs.js";
+import { glyphs, type GlyphSet } from "./glyphs.js";
 
 export interface RichSpan {
   text: string;
@@ -12,7 +12,12 @@ export interface RichLine {
   spans: RichSpan[];
 }
 
-export function renderMarkdown(source: string, width: number, options: { raw?: boolean } = {}): RichLine[] {
+export function renderMarkdown(
+  source: string,
+  width: number,
+  options: { raw?: boolean; glyphs?: GlyphSet } = {},
+): RichLine[] {
+  const set = options.glyphs ?? glyphs;
   if (options.raw === true) {
     return wrapText(source, width).map((text) => ({ spans: [{ text, style: { fg: theme.mdText } }] }));
   }
@@ -54,7 +59,7 @@ export function renderMarkdown(source: string, width: number, options: { raw?: b
       continue;
     }
     if (/^\s*[-*_]{3,}\s*$/.test(line)) {
-      lines.push({ spans: [{ text: glyphs.rule, style: { fg: theme.mdMuted } }] });
+      lines.push({ spans: [{ text: set.rule, style: { fg: theme.mdMuted } }] });
       continue;
     }
     const heading = /^(#{1,6})\s+(.*)$/.exec(line);
@@ -72,7 +77,7 @@ export function renderMarkdown(source: string, width: number, options: { raw?: b
       const inner = wrapInline(quote[1] ?? "", Math.max(1, width - 2), { fg: theme.mdText });
       for (const wrapped of inner) {
         lines.push({
-          spans: [{ text: `${glyphs.quote} `, style: { fg: theme.mdMuted } }, ...wrapped.spans],
+          spans: [{ text: `${set.quote} `, style: { fg: theme.mdMuted } }, ...wrapped.spans],
         });
       }
       continue;
@@ -81,7 +86,7 @@ export function renderMarkdown(source: string, width: number, options: { raw?: b
     if (ul) {
       const inner = wrapInline(ul[1] ?? "", Math.max(1, width - 2), { fg: theme.mdText });
       inner.forEach((wrapped, index) => {
-        const bullet = index === 0 ? `${glyphs.list} ` : "  ";
+        const bullet = index === 0 ? `${set.list} ` : "  ";
         lines.push({
           spans: [{ text: bullet, style: { fg: theme.mdMuted } }, ...wrapped.spans],
         });

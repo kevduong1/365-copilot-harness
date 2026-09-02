@@ -121,7 +121,7 @@ export class SubagentManager {
       lastActivityAt: Date.now(),
     };
     this.entries.set(id, entry);
-    this.options.onLifecycle?.(record, "queued");
+    this.emitLifecycle(record, "queued");
     return this.execute(entry, task, true);
   }
 
@@ -157,11 +157,11 @@ export class SubagentManager {
   private async execute(entry: SubagentEntry, task: string, fresh: boolean): Promise<SubagentRun> {
     const { record } = entry;
     const release = await this.semaphore.acquire();
-    record.status = "running";
-    record.steps = 0;
-    delete record.endedAt;
-    this.options.onLifecycle?.(record, "started");
     try {
+      record.status = "running";
+      record.steps = 0;
+      delete record.endedAt;
+      this.emitLifecycle(record, "started");
       if (fresh) {
         entry.session = await this.options.openSession();
         record.sessionOpen = true;
@@ -174,14 +174,15 @@ export class SubagentManager {
       record.lastResult = response;
       record.endedAt = Date.now();
       this.captureUsage(entry);
-      this.options.onLifecycle?.(record, "completed");
+      this.emitLifecycle(record, "completed");
       return { record, response };
     } catch (error) {
       record.status = "failed";
       record.lastError = error instanceof Error ? error.message : String(error);
       record.endedAt = Date.now();
       this.captureUsage(entry);
-      this.options.onLifecycle?.(record, "failed");
+      this.emitLifecycle(record, "failed");
+      if (fresh && entry.agent === undefined) await this.closeEntry(entry);
       throw new Error(`Subagent #${record.id} (${record.name}) failed: ${record.lastError}`, {
         cause: error,
       });
@@ -189,7 +190,7 @@ export class SubagentManager {
       entry.busy = false;
       entry.lastActivityAt = Date.now();
       release();
-      await this.enforceIdleLimit();
+      await this.enforceIdleLimit().catch(() => undefined);
     }
   }
 
@@ -216,8 +217,12 @@ export class SubagentManager {
   }
 
   private captureUsage(entry: SubagentEntry): void {
-    const usage = entry.session?.getTokenUsage?.();
-    if (usage !== undefined) entry.record.tokenUsage = usage;
+    try {
+      const usage = entry.session?.getTokenUsage?.();
+      if (usage !== undefined) entry.record.tokenUsage = usage;
+    } catch {
+      // Usage is diagnostic; it must not change task lifecycle semantics.
+    }
   }
 
   private async enforceIdleLimit(): Promise<void> {
@@ -231,12 +236,22 @@ export class SubagentManager {
   }
 
   private async closeEntry(entry: SubagentEntry): Promise<void> {
+    if (entry.session === undefined && !entry.record.sessionOpen) return;
     const session = entry.session;
     entry.session = undefined;
     entry.agent = undefined;
     entry.record.sessionOpen = false;
     if (session !== undefined) await session.close().catch(() => undefined);
-    this.options.onLifecycle?.(entry.record, "closed");
+    this.emitLifecycle(entry.record, "closed");
+  }
+
+  private emitLifecycle(record: SubagentRecord, event: SubagentLifecycleEvent): void {
+    try {
+      const pending = this.options.onLifecycle?.(record, event);
+      if (pending !== undefined) void Promise.resolve(pending).catch(() => undefined);
+    } catch {
+      // Observers must never consume permits, leak tabs, or change task results.
+    }
   }
 }
 

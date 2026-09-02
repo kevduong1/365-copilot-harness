@@ -1,6 +1,7 @@
 import type { TokenUsageEstimate } from "../tokens.js";
 import type { ToolCall, ToolDefinition } from "../agent/types.js";
 import type { SubagentRecord } from "../agent/subagent.js";
+import type { CompletionModel } from "./completion.js";
 
 export type Screen = "welcome" | "agent";
 export type Focus = "prompt" | "scrollback";
@@ -135,6 +136,7 @@ export interface TuiState {
   launchError: string;
   prompt: string;
   cursor: number;
+  completion?: CompletionModel | undefined;
   history: string[];
   historyIndex: number;
   stash: string;
@@ -182,6 +184,7 @@ export interface HitRegion {
     | { kind: "menu"; index: number }
     | { kind: "stop" }
     | { kind: "overlay"; index: number }
+    | { kind: "completion"; index: number }
     | { kind: "approve"; option: number }
     | { kind: "expand"; index: number };
   rect: { x: number; y: number; w: number; h: number };
@@ -219,6 +222,7 @@ export function createState(options: TuiOptions, now = Date.now()): TuiState {
     launchError: "",
     prompt: "",
     cursor: 0,
+    completion: undefined,
     history: [],
     historyIndex: -1,
     stash: "",

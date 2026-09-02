@@ -1,20 +1,27 @@
 import type { Rect, ScreenBuffer, Style } from "./buffer.js";
-import { glyphs } from "./glyphs.js";
+import { glyphs, type GlyphSet } from "./glyphs.js";
 import { stringWidth, truncate } from "./format.js";
 
 export function drawBox(
   buf: ScreenBuffer,
   rect: Rect,
   style: Style,
-  options: { title?: string; footer?: string; titleStyle?: Style; footerStyle?: Style } = {},
+  options: {
+    title?: string;
+    footer?: string;
+    titleStyle?: Style;
+    footerStyle?: Style;
+    glyphs?: GlyphSet;
+  } = {},
 ): Rect {
   if (rect.w < 2 || rect.h < 2) return rect;
-  const h = glyphs.boxH;
-  const v = glyphs.boxV;
-  buf.text(rect.x, rect.y, glyphs.boxTl, style);
-  buf.text(rect.x + rect.w - 1, rect.y, glyphs.boxTr, style);
-  buf.text(rect.x, rect.y + rect.h - 1, glyphs.boxBl, style);
-  buf.text(rect.x + rect.w - 1, rect.y + rect.h - 1, glyphs.boxBr, style);
+  const set = options.glyphs ?? glyphs;
+  const h = set.boxH;
+  const v = set.boxV;
+  buf.text(rect.x, rect.y, set.boxTl, style);
+  buf.text(rect.x + rect.w - 1, rect.y, set.boxTr, style);
+  buf.text(rect.x, rect.y + rect.h - 1, set.boxBl, style);
+  buf.text(rect.x + rect.w - 1, rect.y + rect.h - 1, set.boxBr, style);
   const top = h.repeat(Math.max(0, rect.w - 2));
   const bottom = h.repeat(Math.max(0, rect.w - 2));
   buf.text(rect.x + 1, rect.y, top, style);
@@ -36,8 +43,15 @@ export function drawBox(
   return { x: rect.x + 1, y: rect.y + 1, w: rect.w - 2, h: rect.h - 2 };
 }
 
-export function hline(buf: ScreenBuffer, x: number, y: number, width: number, style: Style): void {
-  buf.text(x, y, glyphs.boxH.repeat(Math.max(0, width)), style);
+export function hline(
+  buf: ScreenBuffer,
+  x: number,
+  y: number,
+  width: number,
+  style: Style,
+  set: GlyphSet = glyphs,
+): void {
+  buf.text(x, y, set.boxH.repeat(Math.max(0, width)), style);
 }
 
 export function joinHints(parts: string[], width: number): string {

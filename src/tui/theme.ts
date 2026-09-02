@@ -1,44 +1,57 @@
-/**
- * Oscura Midnight chrome palette, byte-exact from Grok Build
- * (`xai-grok-pager-render` ThemeKind::OscuraMidnight, Apache-2.0).
- */
-
+/** Canonical Waypoint swatches from the approved visual reference. */
 export const palette = {
-  base: "#030304",
-  surface: "#040507",
-  elevated: "#0F1216",
-  panel: "#040406",
-  text: "#E4E4E4",
-  textDim: "#BEBEBE",
-  muted: "#81868F",
-  subtle: "#5E646C",
-  gold: "#EBD96E",
-  red: "#DC5A64",
-  teal: "#50B48C",
-  amber: "#F1BD00",
-  purple: "#9B7ECE",
-  purpleDim: "#6E5A9A",
-  purpleBright: "#C4A7E7",
-  cyan: "#7DCFDF",
-  highlightLow: "#12101C",
-  highlightMed: "#242034",
-  highlightHigh: "#343048",
-  diffDeleteBg: "#2D0F19",
-  diffInsertBg: "#0A231E",
-  captionFocused: "#737374",
-  captionUnfocused: "#4E4E4E",
+  jetBlack: "#0D0D0F",
+  carbon: "#1A1C1F",
+  slate: "#2A2D31",
+  graphite: "#3C4046",
+  steel: "#5A6068",
+  garminBlue: "#007CC3",
+  skyBlue: "#4DA6D9",
+  iceBlue: "#8FB3C8",
+} as const;
+
+/**
+ * The eight reference swatches do not include accessible neutral body text or
+ * semantic states. Keep those deliberate exceptions named and centralized.
+ */
+export const derivedColors = {
+  text: "#F3F4F6",
+  textDim: "#D2D6DA",
+  mutedText: "#969CA4",
+  success: "#66C28A",
+  error: "#FF747A",
+  warning: "#F2C14E",
+  violet: "#B9A7E8",
+  string: "#91C990",
+  number: "#FFB17A",
+} as const;
+
+/** Structural and interaction roles map directly to the canonical swatches. */
+export const colorRoles = {
+  base: palette.jetBlack,
+  surface: palette.carbon,
+  elevated: palette.slate,
+  panel: palette.carbon,
+  border: palette.graphite,
+  borderStrong: palette.steel,
+  muted: palette.iceBlue,
+  selection: palette.slate,
+  primary: palette.garminBlue,
+  bright: palette.skyBlue,
+  soft: palette.iceBlue,
+  codeBackground: palette.carbon,
 } as const;
 
 export const syntax = {
-  comment: "#51597d",
-  keyword: "#bb9af7",
-  function: "#7aa2f7",
-  variable: "#c8c8c8",
-  string: "#9ece6a",
-  number: "#ff9e64",
-  type: "#0db9d7",
-  operator: "#89ddff",
-  punctuation: "#9abdf5",
+  comment: derivedColors.mutedText,
+  keyword: derivedColors.violet,
+  function: palette.skyBlue,
+  variable: derivedColors.textDim,
+  string: derivedColors.string,
+  number: derivedColors.number,
+  type: palette.iceBlue,
+  operator: palette.iceBlue,
+  punctuation: derivedColors.mutedText,
 } as const;
 
 export interface Theme {
@@ -75,48 +88,47 @@ export interface Theme {
 }
 
 export const theme: Theme = {
-  bgBase: palette.base,
-  bgLight: palette.elevated,
-  bgDark: palette.surface,
-  bgHighlight: palette.elevated,
-  bgVisual: palette.highlightMed,
-  textPrimary: palette.text,
-  textSecondary: palette.textDim,
-  gray: palette.muted,
-  grayDim: palette.subtle,
-  grayBright: palette.textDim,
-  accentUser: palette.purpleBright,
-  accentAssistant: palette.purple,
-  accentThinking: palette.muted,
-  accentTool: palette.subtle,
-  accentSuccess: palette.teal,
-  accentError: palette.red,
-  accentRunning: palette.purpleDim,
-  command: palette.gold,
-  warning: palette.gold,
-  path: palette.amber,
-  promptBorder: palette.highlightMed,
-  promptBorderActive: palette.highlightHigh,
-  mdMuted: palette.muted,
-  mdText: palette.text,
-  mdCode: palette.cyan,
-  mdCodeBg: palette.surface,
-  linkFg: palette.cyan,
+  bgBase: colorRoles.base,
+  bgLight: colorRoles.elevated,
+  bgDark: colorRoles.surface,
+  bgHighlight: colorRoles.panel,
+  bgVisual: colorRoles.selection,
+  textPrimary: derivedColors.text,
+  textSecondary: derivedColors.textDim,
+  gray: colorRoles.muted,
+  grayDim: derivedColors.mutedText,
+  grayBright: derivedColors.textDim,
+  accentUser: colorRoles.bright,
+  // Garmin Blue is reserved for non-text emphasis; Sky Blue clears AA on Jet.
+  accentAssistant: colorRoles.bright,
+  accentThinking: colorRoles.soft,
+  accentTool: derivedColors.mutedText,
+  accentSuccess: derivedColors.success,
+  accentError: derivedColors.error,
+  accentRunning: colorRoles.bright,
+  command: derivedColors.warning,
+  warning: derivedColors.warning,
+  path: colorRoles.bright,
+  promptBorder: colorRoles.border,
+  promptBorderActive: colorRoles.primary,
+  mdMuted: derivedColors.mutedText,
+  mdText: derivedColors.text,
+  mdCode: colorRoles.bright,
+  mdCodeBg: colorRoles.codeBackground,
+  linkFg: colorRoles.bright,
   heading: [
-    palette.text,
-    palette.purpleBright,
-    palette.purple,
-    palette.teal,
-    palette.gold,
-    palette.cyan,
+    derivedColors.text,
+    colorRoles.bright,
+    colorRoles.soft,
+    derivedColors.success,
+    derivedColors.warning,
+    derivedColors.violet,
   ],
-  captionFocused: palette.captionFocused,
-  captionUnfocused: palette.captionUnfocused,
+  captionFocused: derivedColors.textDim,
+  captionUnfocused: derivedColors.mutedText,
 };
 
-export const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"] as const;
-export const SPINNER_MS = 133;
-export const SHIMMER_FPS = 12;
+export const SPINNER_MS = 160;
 export const OUTER_HPAD = 2;
 export const OUTER_VPAD = 1;
 export const MAX_SLASH_VISIBLE = 6;

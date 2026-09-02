@@ -11,10 +11,15 @@ import { CopilotClient } from "../client.js";
 import { NotLoggedInError, ResponseTimeoutError } from "../errors.js";
 import type { TokenUsageEstimate } from "../tokens.js";
 import { applyToast, makeEntry, patchEntry } from "./dispatch.js";
-import { callSummary, type TuiState } from "./types.js";
+import type { TuiState } from "./types.js";
 import { TOOL_DISPLAY_LIMIT } from "./theme.js";
 
 export type StateSetter = (update: (state: TuiState) => TuiState) => void;
+
+export interface TuiHarnessDependencies {
+  launchClient?: typeof CopilotClient.launch;
+  createTools?: typeof createOrchestratorTools;
+}
 
 export class TuiHarness {
   client: CopilotClient | undefined;
@@ -22,7 +27,10 @@ export class TuiHarness {
   manager: SubagentManager | undefined;
   private readonly pending = new Map<number, (allow: boolean) => void>();
   private running: Promise<void> | undefined;
+  private launchPromise: Promise<void> | undefined;
+  private launchWaitsForLogin = false;
   private cancelled = false;
+  private closing = false;
 
   constructor(
     private readonly setState: StateSetter,
@@ -30,9 +38,31 @@ export class TuiHarness {
     private readonly cwd: string,
     private readonly allowedRoots: string[],
     private readonly readOnly: boolean,
+    private readonly dependencies: TuiHarnessDependencies = {},
   ) {}
 
-  async launch(waitForLogin = false): Promise<void> {
+  launch(waitForLogin = false): Promise<void> {
+    if (this.closing || this.client !== undefined) return Promise.resolve();
+    if (this.launchPromise !== undefined) {
+      if (waitForLogin && !this.launchWaitsForLogin) {
+        return this.launchPromise.then(() =>
+          this.closing || this.client !== undefined ? undefined : this.launch(true),
+        );
+      }
+      return this.launchPromise;
+    }
+    this.launchWaitsForLogin = waitForLogin;
+    const pending = this.performLaunch(waitForLogin).finally(() => {
+      if (this.launchPromise === pending) {
+        this.launchPromise = undefined;
+        this.launchWaitsForLogin = false;
+      }
+    });
+    this.launchPromise = pending;
+    return pending;
+  }
+
+  private async performLaunch(waitForLogin: boolean): Promise<void> {
     this.setState((state) => ({
       ...state,
       launching: true,
@@ -40,12 +70,20 @@ export class TuiHarness {
       turn: "starting",
       turnStartedAt: Date.now(),
     }));
+    let client: CopilotClient | undefined;
     try {
-      const client = await CopilotClient.launch(waitForLogin ? { waitForLogin: true } : {});
-      this.client = client;
+      const launchClient = this.dependencies.launchClient ?? CopilotClient.launch;
+      const createTools = this.dependencies.createTools ?? createOrchestratorTools;
+      const launchedClient = await launchClient(waitForLogin ? { waitForLogin: true } : {});
+      client = launchedClient;
+      if (this.closing) {
+        await launchedClient.close();
+        client = undefined;
+        return;
+      }
       const confirmTool: ConfirmTool = (call, definition) => this.requestApproval(call, definition);
-      this.manager = new SubagentManager({
-        openSession: () => client.newTabSession(),
+      const manager = new SubagentManager({
+        openSession: () => launchedClient.newTabSession(),
         cwd: this.cwd,
         allowedRoots: this.allowedRoots,
         readOnly: this.readOnly,
@@ -53,25 +91,43 @@ export class TuiHarness {
         onEvent: (record, event) => this.onAgentEvent(event, record.id),
         onLifecycle: (record, event) => this.onLifecycle(record, event),
       });
-      this.agent = new CodingAgent(client, {
+      const tools = await createTools(manager, this.cwd, this.allowedRoots);
+      const agent = new CodingAgent(launchedClient, {
         cwd: this.cwd,
         allowedRoots: this.allowedRoots,
         readOnly: this.readOnly,
         confirmTool,
         onEvent: (event) => this.onAgentEvent(event),
-        tools: await createOrchestratorTools(this.manager, this.cwd, this.allowedRoots),
+        tools,
       });
+      const toolNames = await agent.toolNames();
+      if (this.closing) {
+        await launchedClient.close();
+        client = undefined;
+        return;
+      }
+      this.client = launchedClient;
+      this.manager = manager;
+      this.agent = agent;
+      this.cancelled = false;
       this.setState((state) => ({
         ...state,
         ready: true,
         launching: false,
         launchError: "",
         turn: "idle",
-        usage: client.getTokenUsage(),
-        tools: [],
+        usage: launchedClient.getTokenUsage(),
+        tools: toolNames,
       }));
-      await this.refreshTools();
+      client = undefined;
     } catch (error) {
+      if (client !== undefined && this.client === client) {
+        this.client = undefined;
+        this.manager = undefined;
+        this.agent = undefined;
+      }
+      await client?.close().catch(() => undefined);
+      if (this.closing) return;
       const message =
         error instanceof NotLoggedInError
           ? "Not logged in. Run pnpm cli login, or /login here."
@@ -87,18 +143,36 @@ export class TuiHarness {
   }
 
   async close(): Promise<void> {
+    if (this.closing) return;
+    this.closing = true;
     this.cancelled = true;
-    await this.client?.close();
+    try {
+      this.declinePendingApprovals();
+    } catch {
+      // Browser cleanup still has to run if a UI observer fails during shutdown.
+    }
+    const client = this.client;
+    this.client = undefined;
+    this.agent = undefined;
+    this.manager = undefined;
+    await client?.close();
   }
 
   async send(text: string, sessionKind: "agent" | "chat"): Promise<void> {
-    const run = this.running ?? Promise.resolve();
-    this.running = run.then(() => this.runTurn(text, sessionKind));
-    await this.running;
+    if (this.closing) return;
+    const previous = this.running ?? Promise.resolve();
+    const current = previous.catch(() => undefined).then(() => this.runTurn(text, sessionKind));
+    this.running = current;
+    try {
+      await current;
+    } finally {
+      if (this.running === current) this.running = undefined;
+    }
   }
 
   cancel(): void {
     this.cancelled = true;
+    this.declinePendingApprovals();
   }
 
   resolveApproval(id: number, allow: boolean): void {
@@ -224,6 +298,7 @@ export class TuiHarness {
   }
 
   private async requestApproval(call: ToolCall, definition: ToolDefinition): Promise<boolean> {
+    if (this.closing || this.cancelled) return false;
     if (this.getState().permission === "always") return true;
     return await new Promise<boolean>((resolve) => {
       this.setState((state) => {
@@ -237,6 +312,14 @@ export class TuiHarness {
         };
       });
     });
+  }
+
+  private declinePendingApprovals(): void {
+    if (this.pending.size === 0 && this.getState().approval === undefined) return;
+    const pending = [...this.pending.values()];
+    this.pending.clear();
+    for (const resolve of pending) resolve(false);
+    this.setState((state) => ({ ...state, approval: undefined }));
   }
 
   private onAgentEvent(event: AgentEvent, agentId?: number): void {
@@ -335,7 +418,12 @@ export class TuiHarness {
   }
 
   private syncUsage(): void {
-    const usage = this.client?.getTokenUsage();
+    let usage: TokenUsageEstimate | undefined;
+    try {
+      usage = this.client?.getTokenUsage();
+    } catch {
+      return;
+    }
     if (usage === undefined) return;
     this.setState((state) => ({ ...state, usage }));
   }

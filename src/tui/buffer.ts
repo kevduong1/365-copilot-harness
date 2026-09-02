@@ -1,4 +1,5 @@
 import { charWidth, hexToRgb } from "./format.js";
+import { terminalCapabilities, type TerminalColorMode } from "./capabilities.js";
 
 export interface Style {
   fg?: string;
@@ -29,21 +30,31 @@ function sameStyle(a: Style, b: Style): boolean {
   return styleKey(a) === styleKey(b);
 }
 
-function emptyCell(bg: string): Cell {
-  return { ch: " ", style: { bg } };
+function emptyCell(bg: string, defaultBackground: boolean): Cell {
+  return { ch: " ", style: defaultBackground ? {} : { bg } };
 }
 
 export class ScreenBuffer {
   readonly cols: number;
   readonly rows: number;
   readonly bg: string;
+  readonly colorMode: TerminalColorMode;
+  readonly defaultBackground: boolean;
   private readonly cells: Cell[];
 
-  constructor(cols: number, rows: number, bg: string) {
+  constructor(
+    cols: number,
+    rows: number,
+    bg: string,
+    colorMode: TerminalColorMode = terminalCapabilities().colorMode,
+    defaultBackground = terminalCapabilities().defaultBackground === true,
+  ) {
     this.cols = Math.max(0, cols);
     this.rows = Math.max(0, rows);
     this.bg = bg;
-    this.cells = Array.from({ length: this.cols * this.rows }, () => emptyCell(bg));
+    this.colorMode = colorMode;
+    this.defaultBackground = defaultBackground;
+    this.cells = Array.from({ length: this.cols * this.rows }, () => emptyCell(bg, defaultBackground));
   }
 
   at(x: number, y: number): Cell | undefined {
@@ -55,8 +66,11 @@ export class ScreenBuffer {
     if (x < 0 || y < 0 || x >= this.cols || y >= this.rows) return;
     const cell = this.cells[y * this.cols + x];
     if (cell === undefined) return;
-    cell.ch = ch;
-    cell.style = { ...style, ...(style.bg === undefined ? { bg: this.bg } : { bg: style.bg }) };
+    cell.ch = safeCellChar(ch);
+    cell.style = {
+      ...style,
+      ...(style.bg === undefined && !this.defaultBackground ? { bg: this.bg } : {}),
+    };
   }
 
   fill(rect: Rect, style: Style = {}): void {
@@ -118,7 +132,7 @@ export class ScreenBuffer {
         if (x !== lastX + 1 || y !== lastY) out += `\x1b[${y + 1};${x + 1}H`;
         const key = styleKey(next.style);
         if (key !== lastStyle) {
-          out += sgr(next.style, this.bg);
+          out += sgr(next.style, this.bg, this.colorMode, this.defaultBackground);
           lastStyle = key;
         }
         out += next.ch === "" ? " " : next.ch;
@@ -139,7 +153,7 @@ export class ScreenBuffer {
         if (cell.ch === "") continue;
         const key = styleKey(cell.style);
         if (key !== lastStyle) {
-          out += sgr(cell.style, this.bg);
+          out += sgr(cell.style, this.bg, this.colorMode, this.defaultBackground);
           lastStyle = key;
         }
         out += cell.ch;
@@ -149,16 +163,28 @@ export class ScreenBuffer {
   }
 }
 
-export function sgr(style: Style, fallbackBg: string): string {
+/** Never let rendered conversation or tool text become terminal instructions. */
+function safeCellChar(ch: string): string {
+  return /[\u0000-\u001f\u007f-\u009f]/u.test(ch) ? "�" : ch;
+}
+
+export function sgr(
+  style: Style,
+  fallbackBg: string,
+  colorMode: TerminalColorMode = terminalCapabilities().colorMode,
+  defaultBackground = terminalCapabilities().defaultBackground === true,
+): string {
   const parts = ["0"];
   if (style.bold === true) parts.push("1");
   if (style.dim === true) parts.push("2");
   if (style.italic === true) parts.push("3");
   if (style.underline === true) parts.push("4");
-  const fg = rgbSeq(style.fg);
-  if (fg !== undefined) parts.push(`38;2;${fg}`);
-  const bg = rgbSeq(style.bg ?? fallbackBg);
-  if (bg !== undefined) parts.push(`48;2;${bg}`);
+  if (colorMode === "truecolor") {
+    const fg = rgbSeq(style.fg);
+    if (fg !== undefined) parts.push(`38;2;${fg}`);
+    const bg = rgbSeq(style.bg ?? (defaultBackground ? undefined : fallbackBg));
+    if (bg !== undefined) parts.push(`48;2;${bg}`);
+  }
   return `\x1b[${parts.join(";")}m`;
 }
 

@@ -1,3 +1,5 @@
+import { colorRoles, derivedColors } from "./theme.js";
+
 export function hexToRgb(hex: string): [number, number, number] {
   const short = hex.trim().replace(/^#/, "");
   const full = short.length === 3 ? short.replace(/./g, (ch) => ch + ch) : short;
@@ -70,12 +72,12 @@ export function formatPercent5(pct: number): string {
 }
 
 const CONTEXT_STOPS: readonly (readonly [number, string])[] = [
-  [0, "#E4E4E4"],
-  [50, "#C4A7E7"],
-  [65, "#C4A7E7"],
-  [75, "#EBD96E"],
-  [85, "#EBD96E"],
-  [95, "#DC5A64"],
+  [0, colorRoles.soft],
+  [50, colorRoles.bright],
+  [65, colorRoles.bright],
+  [75, derivedColors.warning],
+  [85, derivedColors.warning],
+  [95, derivedColors.error],
 ];
 
 export function contextGradientHex(percent: number): string {
@@ -187,20 +189,4 @@ export function wrapText(text: string, width: number): string[] {
     lines.push(current);
   }
   return lines;
-}
-
-export function shineOpacity(diag: number, secs: number): number {
-  const band = 0.38;
-  const cycle = 4.0;
-  const sweepFrac = 0.32;
-  const shine = 0.33;
-  const pulseAmt = 0.06;
-  const pulseSecs = 5.0;
-  const p = (secs % cycle) / cycle;
-  const q = Math.min(1, p / sweepFrac);
-  const bandPos = -band + q * (1 + 2 * band);
-  const pulse = pulseAmt * (0.5 - 0.5 * Math.cos((Math.PI * 2 * secs) / pulseSecs));
-  const d = Math.abs(diag - bandPos);
-  const shineAmt = d < band ? 0.5 * (1 + Math.cos((Math.PI * d) / band)) : 0;
-  return Math.min(1, Math.max(0, pulse + shine * shineAmt));
 }

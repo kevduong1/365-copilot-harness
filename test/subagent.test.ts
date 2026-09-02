@@ -236,3 +236,42 @@ test("Subagent approvals are serialized through the parent confirm callback", as
   assert.equal(beta.response, "Beta done.");
   assert.equal(tracker.peak, 1);
 });
+
+test("SubagentManager closes a session when agent initialization fails", async () => {
+  const session = new ScriptedSession([]);
+  const lifecycle: string[] = [];
+  const manager = new SubagentManager({
+    openSession: async () => session,
+    createTools: () => {
+      throw new Error("workspace initialization failed");
+    },
+    onLifecycle: (_record, event) => {
+      lifecycle.push(event);
+    },
+  });
+
+  await assert.rejects(manager.spawn("Inspect workspace"), /workspace initialization failed/);
+  assert.equal(session.closed, true);
+  assert.equal(manager.get(1)?.sessionOpen, false);
+  assert.deepEqual(lifecycle, ["queued", "started", "failed", "closed"]);
+});
+
+test("SubagentManager lifecycle observer failures do not leak semaphore permits", async () => {
+  const sessions = [new ScriptedSession(["First done."]), new ScriptedSession(["Second done."])];
+  let opened = 0;
+  const manager = new SubagentManager({
+    openSession: async () => sessions[opened++]!,
+    createTools: () => [],
+    maxConcurrent: 1,
+    onLifecycle: () => {
+      throw new Error("observer failed");
+    },
+  });
+
+  const first = await manager.spawn("First");
+  const second = await manager.spawn("Second");
+
+  assert.equal(first.response, "First done.");
+  assert.equal(second.response, "Second done.");
+  assert.equal(opened, 2);
+});

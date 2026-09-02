@@ -1,5 +1,6 @@
 import { ScreenBuffer, type Rect, type Style } from "./buffer.js";
 import { welcomeItems, filterCommands, paletteItems } from "./commands.js";
+import { activeCompletion } from "./completion.js";
 import { drawBox, hline, joinHints } from "./draw.js";
 import {
   blendHex,
@@ -11,15 +12,19 @@ import {
   stringWidth,
   truncate,
 } from "./format.js";
-import { glyphs, PROMPT_ARROW } from "./glyphs.js";
-import { pickLogo, shineLogo } from "./logo.js";
+import {
+  ASCII_SPINNER_FRAMES,
+  glyphs,
+  promptArrow,
+  UNICODE_SPINNER_FRAMES,
+} from "./glyphs.js";
+import { terminalCapabilities, type TerminalCapabilities } from "./capabilities.js";
+import { pickWaypointMark, styleWaypointMark, waypointSize } from "./waypoint.js";
 import { renderMarkdown } from "./markdown.js";
-import { atQuery, promptLines, slashToken, wrappedCursor } from "./prompt.js";
-import { fuzzyFilter } from "./fuzzy.js";
+import { promptLines, wrappedCursor } from "./prompt.js";
 import {
   OUTER_HPAD,
   OUTER_VPAD,
-  SPINNER_FRAMES,
   SPINNER_MS,
   MAX_SLASH_VISIBLE,
   theme,
@@ -31,8 +36,10 @@ import {
   type HitRegion,
   type ScrollbackEntry,
   type TuiState,
-  type ToolEntry,
 } from "./types.js";
+
+const PROMPT_ARROW = promptArrow(glyphs);
+const SPINNER_FRAMES = UNICODE_SPINNER_FRAMES;
 
 export interface Frame {
   buffer: ScreenBuffer;
@@ -40,9 +47,18 @@ export interface Frame {
   cursor: { x: number; y: number; visible: boolean };
 }
 
-export function renderFrame(state: TuiState, cols: number, rows: number): Frame {
-  const buffer = new ScreenBuffer(cols, rows, theme.bgBase);
-  buffer.fill({ x: 0, y: 0, w: cols, h: rows }, { bg: theme.bgBase });
+export function renderFrame(
+  state: TuiState,
+  cols: number,
+  rows: number,
+  capabilities: TerminalCapabilities = terminalCapabilities(),
+): Frame {
+  const transparent = capabilities.defaultBackground === true;
+  const buffer = new ScreenBuffer(cols, rows, theme.bgBase, capabilities.colorMode, transparent);
+  buffer.fill(
+    { x: 0, y: 0, w: cols, h: rows },
+    transparent ? {} : { bg: theme.bgBase },
+  );
   const hits: HitRegion[] = [];
   let cursor = { x: 0, y: 0, visible: false };
 
@@ -52,11 +68,11 @@ export function renderFrame(state: TuiState, cols: number, rows: number): Frame 
   }
 
   if (state.overlay !== "none" && state.overlay !== "approval") {
-    const inner = renderAgentOrWelcome(state, buffer, hits, cols, rows);
+    const inner = renderAgentOrWelcome(state, buffer, hits, cols, rows, capabilities);
     cursor = inner;
     renderOverlay(state, buffer, hits, cols, rows);
   } else if (state.screen === "welcome") {
-    cursor = renderWelcome(state, buffer, hits, cols, rows);
+    cursor = renderWelcome(state, buffer, hits, cols, rows, capabilities);
   } else {
     cursor = renderAgent(state, buffer, hits, cols, rows);
   }
@@ -76,8 +92,9 @@ function renderAgentOrWelcome(
   hits: HitRegion[],
   cols: number,
   rows: number,
+  capabilities: TerminalCapabilities,
 ): { x: number; y: number; visible: boolean } {
-  if (state.screen === "welcome") return renderWelcome(state, buffer, hits, cols, rows);
+  if (state.screen === "welcome") return renderWelcome(state, buffer, hits, cols, rows, capabilities);
   return renderAgent(state, buffer, hits, cols, rows);
 }
 
@@ -87,6 +104,7 @@ function renderWelcome(
   hits: HitRegion[],
   cols: number,
   rows: number,
+  capabilities: TerminalCapabilities,
 ): { x: number; y: number; visible: boolean } {
   const promptH = promptHeight(state, cols);
   const statusY = rows - 1 - OUTER_VPAD;
@@ -108,22 +126,27 @@ function renderWelcome(
   buf.text(OUTER_HPAD + 9, OUTER_VPAD, cwd, { fg: theme.gray });
 
   const items = welcomeItems(state.ready);
-  const logo = pickLogo(rows);
+  let mark = pickWaypointMark({ width: body.w, height: body.h, unicode: capabilities.unicode });
   const secs = state.now / 1000;
   let menuY = body.y + Math.max(1, Math.floor(body.h * 0.18));
 
-  if (logo !== undefined) {
-    const art = shineLogo(logo, secs);
-    const width = art.reduce((max, line) => Math.max(max, line.length), 0);
-    const startX = Math.max(body.x, body.x + Math.floor((body.w - width) / 2));
+  if (mark !== undefined) {
+    const menuAfterMark = menuY + waypointSize(mark).height + 3;
+    if (menuAfterMark + items.length > promptBox.y) mark = undefined;
+  }
+
+  if (mark !== undefined) {
+    const art = styleWaypointMark(mark, secs, !capabilities.reducedMotion);
+    const size = waypointSize(mark);
+    const startX = Math.max(body.x, body.x + Math.floor((body.w - size.width) / 2));
     art.forEach((line, row) => {
       line.forEach((cell, col) => {
         buf.put(startX + col, menuY + row, cell.ch, cell.style);
       });
     });
     menuY += art.length + 1;
-    const word = "Copilot";
-    buf.text(Math.max(body.x, body.x + Math.floor((body.w - word.length) / 2)), menuY, word, {
+    const word = "M365 Harness";
+    buf.text(Math.max(body.x, body.x + Math.floor((body.w - stringWidth(word)) / 2)), menuY, word, {
       fg: theme.textPrimary,
       bold: true,
     });
@@ -147,17 +170,21 @@ function renderWelcome(
     hits.push({ id: { kind: "menu", index }, rect: { x: menuX, y, w: menuWidth, h: 1 } });
   });
 
-  if (state.launchError) {
-    buf.text(body.x, menuY + items.length + 2, truncate(state.launchError, body.w), { fg: theme.accentError });
-  } else if (state.launching) {
-    const spin = SPINNER_FRAMES[Math.floor(state.now / SPINNER_MS) % SPINNER_FRAMES.length]!;
-    buf.text(body.x, menuY + items.length + 2, `${spin} Starting session… ${formatDuration(state.now - state.turnStartedAt)}`, {
+  const launchY = menuY + items.length + 2;
+  // At compact heights the prompt takes priority over transient launch text.
+  if (launchY < promptBox.y && state.launchError) {
+    buf.text(body.x, launchY, truncate(state.launchError, body.w), { fg: theme.accentError });
+  } else if (launchY < promptBox.y && state.launching) {
+    const frames = capabilities.unicode ? UNICODE_SPINNER_FRAMES : ASCII_SPINNER_FRAMES;
+    const spin = frames[Math.floor(state.now / SPINNER_MS) % frames.length]!;
+    buf.text(body.x, launchY, `${spin} Starting session… ${formatDuration(state.now - state.turnStartedAt)}`, {
       fg: theme.grayDim,
     });
   }
 
   const cursor = drawPrompt(state, buf, hits, promptBox, true);
   drawShortcuts(state, buf, { x: OUTER_HPAD, y: statusY, w: cols - OUTER_HPAD * 2, h: 1 });
+  drawDropdown(state, buf, hits, promptBox);
   return cursor;
 }
 
@@ -352,7 +379,8 @@ function displayedOutput(output: string): string {
 }
 
 function drawTurnStatus(state: TuiState, buf: ScreenBuffer, hits: HitRegion[], rect: Rect): void {
-  const spin = SPINNER_FRAMES[Math.floor(state.now / SPINNER_MS) % SPINNER_FRAMES.length]!;
+  const frames = terminalCapabilities().unicode ? SPINNER_FRAMES : ASCII_SPINNER_FRAMES;
+  const spin = frames[Math.floor(state.now / SPINNER_MS) % frames.length]!;
   const waiting = state.approval !== undefined;
   const glyph = waiting ? glyphs.waiting : spin;
   const label = turnLabel(state);
@@ -448,21 +476,12 @@ function promptFooter(state: TuiState): string {
 }
 
 function drawDropdown(state: TuiState, buf: ScreenBuffer, hits: HitRegion[], promptBox: Rect): void {
-  const slash = slashToken(state.prompt);
-  const at = atQuery(state.prompt, state.cursor);
-  let items: { label: string; description: string }[] = [];
-  if (slash !== undefined && !state.prompt.includes(" ")) {
-    items = filterCommands(slash).map((command) => ({
-      label: `/${command.name}`,
-      description: command.description,
-    }));
-  } else if (at !== undefined) {
-    items = fuzzyFilter(at, state.files)
-      .slice(0, 20)
-      .map((hit) => ({ label: hit.text, description: "" }));
-  }
-  if (items.length === 0) return;
-  const visible = items.slice(0, MAX_SLASH_VISIBLE);
+  const completion = activeCompletion(state);
+  if (completion === undefined) return;
+  const visible = completion.items.slice(
+    completion.windowStart,
+    completion.windowStart + MAX_SLASH_VISIBLE,
+  );
   const height = visible.length + 2;
   const rect: Rect = {
     x: promptBox.x,
@@ -473,11 +492,12 @@ function drawDropdown(state: TuiState, buf: ScreenBuffer, hits: HitRegion[], pro
   buf.fill(rect, { bg: theme.bgLight });
   hline(buf, rect.x, rect.y, rect.w, { fg: theme.bgHighlight });
   hline(buf, rect.x, rect.y + rect.h - 1, rect.w, { fg: theme.bgHighlight });
-  const count = `${visible.length}/${items.length}`;
+  const count = `${completion.selected + 1}/${completion.items.length}`;
   buf.text(rect.x + rect.w - stringWidth(count) - 1, rect.y, count, { fg: theme.gray });
-  visible.forEach((item, index) => {
-    const selected = index === 0;
-    const y = rect.y + 1 + index;
+  visible.forEach((item, row) => {
+    const index = completion.windowStart + row;
+    const selected = index === completion.selected;
+    const y = rect.y + 1 + row;
     if (selected) buf.fill({ x: rect.x, y, w: rect.w, h: 1 }, { bg: theme.bgVisual });
     const gutter = selected ? `${glyphs.prompt} ` : "  ";
     buf.text(rect.x + 1, y, gutter, {
@@ -497,7 +517,7 @@ function drawDropdown(state: TuiState, buf: ScreenBuffer, hits: HitRegion[], pro
         bg: selected ? theme.bgVisual : theme.bgLight,
       });
     }
-    hits.push({ id: { kind: "overlay", index }, rect: { x: rect.x, y, w: rect.w, h: 1 } });
+    hits.push({ id: { kind: "completion", index }, rect: { x: rect.x, y, w: rect.w, h: 1 } });
   });
 }
 

@@ -1,8 +1,14 @@
-import { filterCommands, findCommand, paletteItems, welcomeItems } from "./commands.js";
-import { fuzzyFilter } from "./fuzzy.js";
+import { findCommand, paletteItems, welcomeItems } from "./commands.js";
+import {
+  acceptCompletion,
+  activeCompletion,
+  dismissCompletion,
+  moveCompletion,
+  selectCompletion,
+  syncCompletion,
+} from "./completion.js";
 import { type InputEvent, type KeyEvent, type MouseEvent } from "./keys.js";
 import {
-  atQuery,
   deleteBackward,
   deleteForward,
   insertText,
@@ -11,7 +17,7 @@ import {
   slashToken,
 } from "./prompt.js";
 import { entryText, lastAssistant } from "./render.js";
-import { ESC_DOUBLE_MS, QUIT_CONFIRM_MS } from "./theme.js";
+import { ESC_DOUBLE_MS, MAX_SLASH_VISIBLE, QUIT_CONFIRM_MS } from "./theme.js";
 import {
   callSummary,
   cycleMode,
@@ -39,6 +45,13 @@ function dispatchMouse(state: TuiState, event: MouseEvent, hits: HitRegion[]): D
     const delta = event.button === "wheelup" ? 3 : -3;
     return { state: { ...next, scrollOffset: Math.max(0, next.scrollOffset + delta), focus: "scrollback" }, effects: [] };
   }
+  if (event.kind === "move") {
+    const hover = [...hits].reverse().find((region) => containsHit(region, event.x, event.y));
+    return {
+      state: hover?.id.kind === "completion" ? selectCompletion(next, hover.id.index) : next,
+      effects: [],
+    };
+  }
   if (event.kind !== "down") return { state: next, effects: [] };
   const hit = [...hits].reverse().find((region) => containsHit(region, event.x, event.y));
   if (hit === undefined) return { state: next, effects: [] };
@@ -55,6 +68,9 @@ function dispatchMouse(state: TuiState, event: MouseEvent, hits: HitRegion[]): D
   }
   if (hit.id.kind === "overlay") {
     return { state: { ...next, overlayIndex: hit.id.index }, effects: [] };
+  }
+  if (hit.id.kind === "completion") {
+    return { state: acceptCompletion(selectCompletion(next, hit.id.index)), effects: [] };
   }
   return { state: next, effects: [] };
 }
@@ -92,6 +108,12 @@ function dispatchKey(state: TuiState, event: KeyEvent): DispatchResult {
 
   if (state.overlay !== "none") return dispatchOverlay(state, event);
   if (state.approval !== undefined && state.focus !== "scrollback") return dispatchApproval(state, event);
+  if (event.name === "escape" && state.focus === "prompt") {
+    const synced = syncCompletion(state);
+    if (activeCompletion(synced) !== undefined) {
+      return { state: dismissCompletion(synced), effects: [] };
+    }
+  }
   if (event.name === "escape") return dispatchEscape(state);
   if (event.name === "tab" && event.shift) return cycle(state);
   if (event.name === "tab") {
@@ -108,7 +130,7 @@ function dispatchKey(state: TuiState, event: KeyEvent): DispatchResult {
 function handleCtrlC(state: TuiState): DispatchResult {
   if (state.overlay !== "none") return { state: { ...state, overlay: "none", overlayQuery: "" }, effects: [] };
   if (state.prompt.length > 0) {
-    return { state: { ...state, prompt: "", cursor: 0 }, effects: [] };
+    return { state: syncCompletion({ ...state, prompt: "", cursor: 0 }), effects: [] };
   }
   if (state.turn !== "idle" && state.turn !== "starting") return cancelTurn(state);
   return { state, effects: [] };
@@ -140,10 +162,16 @@ function armNew(state: TuiState): DispatchResult {
 
 function stashPrompt(state: TuiState): DispatchResult {
   if (state.prompt.length > 0) {
-    return { state: { ...state, stash: state.prompt, prompt: "", cursor: 0 }, effects: [] };
+    return {
+      state: syncCompletion({ ...state, stash: state.prompt, prompt: "", cursor: 0 }),
+      effects: [],
+    };
   }
   if (state.stash.length === 0) return { state, effects: [] };
-  return { state: { ...state, prompt: state.stash, cursor: state.stash.length, stash: "" }, effects: [] };
+  return {
+    state: syncCompletion({ ...state, prompt: state.stash, cursor: state.stash.length, stash: "" }),
+    effects: [],
+  };
 }
 
 function toggleAlways(state: TuiState): DispatchResult {
@@ -175,7 +203,16 @@ function dispatchEscape(state: TuiState): DispatchResult {
   if (state.turn !== "idle" && state.turn !== "starting" && !state.vimMode) return cancelTurn(state);
   if (state.prompt.length > 0) {
     if (state.now <= state.escArmedUntil) {
-      return { state: { ...state, stash: state.prompt, prompt: "", cursor: 0, escArmedUntil: 0 }, effects: [] };
+      return {
+        state: syncCompletion({
+          ...state,
+          stash: state.prompt,
+          prompt: "",
+          cursor: 0,
+          escArmedUntil: 0,
+        }),
+        effects: [],
+      };
     }
     return {
       state: {
@@ -312,7 +349,15 @@ function dispatchScrollback(state: TuiState, event: KeyEvent): DispatchResult {
   const letter = event.name === "char" && event.char.length === 1 && !event.ctrl;
   if (!state.vimMode && letter && /[a-z]/i.test(event.char) && event.char !== "?") {
     const inserted = insertText({ text: state.prompt, cursor: state.cursor }, event.char);
-    return { state: { ...state, focus: "prompt", prompt: inserted.text, cursor: inserted.cursor }, effects: [] };
+    return {
+      state: syncCompletion({
+        ...state,
+        focus: "prompt",
+        prompt: inserted.text,
+        cursor: inserted.cursor,
+      }),
+      effects: [],
+    };
   }
   if (event.name === "space" && !state.vimMode) {
     return { state: { ...state, focus: "prompt" }, effects: [] };
@@ -380,34 +425,48 @@ function mapSelected(state: TuiState, map: (entry: ScrollbackEntry) => Scrollbac
 }
 
 function dispatchPrompt(state: TuiState, event: KeyEvent): DispatchResult {
+  state = syncCompletion(state);
+  const completion = activeCompletion(state);
+  if (completion !== undefined) {
+    if (event.name === "up") return { state: moveCompletion(state, -1), effects: [] };
+    if (event.name === "down") return { state: moveCompletion(state, 1), effects: [] };
+    if (event.name === "pageup") {
+      return { state: moveCompletion(state, -MAX_SLASH_VISIBLE), effects: [] };
+    }
+    if (event.name === "pagedown") {
+      return { state: moveCompletion(state, MAX_SLASH_VISIBLE), effects: [] };
+    }
+  }
   if (event.name === "pageup") return { state: { ...state, scrollOffset: state.scrollOffset + 20 }, effects: [] };
   if (event.name === "pagedown") return { state: { ...state, scrollOffset: Math.max(0, state.scrollOffset - 20) }, effects: [] };
   if (event.name === "up" && state.prompt.length === 0 && state.history.length > 0) return history(state, 1);
   if (event.name === "down" && state.historyIndex >= 0) return history(state, -1);
   if (event.name === "left") {
     const moved = move({ text: state.prompt, cursor: state.cursor }, -1);
-    return { state: { ...state, cursor: moved.cursor }, effects: [] };
+    return { state: syncCompletion({ ...state, cursor: moved.cursor }), effects: [] };
   }
   if (event.name === "right") {
     const moved = move({ text: state.prompt, cursor: state.cursor }, 1);
-    return { state: { ...state, cursor: moved.cursor }, effects: [] };
+    return { state: syncCompletion({ ...state, cursor: moved.cursor }), effects: [] };
   }
-  if (event.name === "home") return { state: { ...state, cursor: 0 }, effects: [] };
-  if (event.name === "end") return { state: { ...state, cursor: state.prompt.length }, effects: [] };
+  if (event.name === "home") return { state: syncCompletion({ ...state, cursor: 0 }), effects: [] };
+  if (event.name === "end") {
+    return { state: syncCompletion({ ...state, cursor: state.prompt.length }), effects: [] };
+  }
   if (event.name === "backspace") {
     const next = deleteBackward({ text: state.prompt, cursor: state.cursor });
-    return { state: { ...state, prompt: next.text, cursor: next.cursor }, effects: [] };
+    return { state: syncCompletion({ ...state, prompt: next.text, cursor: next.cursor }), effects: [] };
   }
   if (event.name === "delete") {
     const next = deleteForward({ text: state.prompt, cursor: state.cursor });
-    return { state: { ...state, prompt: next.text, cursor: next.cursor }, effects: [] };
+    return { state: syncCompletion({ ...state, prompt: next.text, cursor: next.cursor }), effects: [] };
   }
   if (event.ctrl && event.char === "u") {
-    return { state: { ...state, prompt: "", cursor: 0 }, effects: [] };
+    return { state: syncCompletion({ ...state, prompt: "", cursor: 0 }), effects: [] };
   }
   if (event.ctrl && event.char === "k") {
     const next = killLine({ text: state.prompt, cursor: state.cursor });
-    return { state: { ...state, prompt: next.text, cursor: next.cursor }, effects: [] };
+    return { state: syncCompletion({ ...state, prompt: next.text, cursor: next.cursor }), effects: [] };
   }
   if (event.ctrl && event.char === "m") {
     return { state: { ...state, multiline: !state.multiline }, effects: [] };
@@ -415,52 +474,62 @@ function dispatchPrompt(state: TuiState, event: KeyEvent): DispatchResult {
   if (event.name === "enter") return submitPrompt(state, event);
   if (event.name === "paste") {
     const next = insertText({ text: state.prompt, cursor: state.cursor }, event.char.replaceAll("\r\n", "\n").replaceAll("\r", "\n"));
-    return { state: { ...state, prompt: next.text, cursor: next.cursor }, effects: [] };
+    return { state: syncCompletion({ ...state, prompt: next.text, cursor: next.cursor }), effects: [] };
   }
   if (event.name === "space" || event.name === "char") {
     if (event.ctrl) return { state, effects: [] };
     const ch = event.name === "space" ? " " : event.char;
     const next = insertText({ text: state.prompt, cursor: state.cursor }, ch);
-    return { state: { ...state, prompt: next.text, cursor: next.cursor, historyIndex: -1 }, effects: [] };
+    return {
+      state: syncCompletion({ ...state, prompt: next.text, cursor: next.cursor, historyIndex: -1 }),
+      effects: [],
+    };
   }
   return { state, effects: [] };
 }
 
 function history(state: TuiState, delta: number): DispatchResult {
   const index = state.historyIndex < 0 ? state.history.length - 1 : state.historyIndex - delta;
-  if (index < 0) return { state: { ...state, historyIndex: -1, prompt: "", cursor: 0 }, effects: [] };
+  if (index < 0) {
+    return {
+      state: syncCompletion({ ...state, historyIndex: -1, prompt: "", cursor: 0 }),
+      effects: [],
+    };
+  }
   const item = state.history[Math.min(state.history.length - 1, index)];
   if (item === undefined) return { state, effects: [] };
-  return { state: { ...state, historyIndex: index, prompt: item, cursor: item.length }, effects: [] };
+  return {
+    state: syncCompletion({ ...state, historyIndex: index, prompt: item, cursor: item.length }),
+    effects: [],
+  };
 }
 
 function submitPrompt(state: TuiState, event: KeyEvent): DispatchResult {
   if (state.multiline && !event.shift && !event.alt && state.prompt.length > 0) {
     const next = insertText({ text: state.prompt, cursor: state.cursor }, "\n");
-    return { state: { ...state, prompt: next.text, cursor: next.cursor }, effects: [] };
+    return { state: syncCompletion({ ...state, prompt: next.text, cursor: next.cursor }), effects: [] };
   }
   if (event.shift || event.alt) {
     const next = insertText({ text: state.prompt, cursor: state.cursor }, "\n");
-    return { state: { ...state, prompt: next.text, cursor: next.cursor }, effects: [] };
+    return { state: syncCompletion({ ...state, prompt: next.text, cursor: next.cursor }), effects: [] };
+  }
+  state = syncCompletion(state);
+  const completion = activeCompletion(state);
+  if (completion !== undefined) {
+    const selected = completion.items[completion.selected];
+    const exact = completion.kind === "slash" ? findCommand(completion.query) : undefined;
+    if (completion.kind === "file" || exact === undefined || selected?.value !== exact.name) {
+      return { state: acceptCompletion(state), effects: [] };
+    }
   }
   const slash = slashToken(state.prompt);
   if (slash !== undefined && !state.prompt.slice(slash.length).startsWith("\n")) {
-    const commands = filterCommands(slash);
-    if (!state.prompt.includes(" ") && commands.length > 0 && findCommand(slash) === undefined) {
-      const pick = commands[0]!;
-      return { state: { ...state, prompt: `/${pick.name} `, cursor: pick.name.length + 2 }, effects: [] };
-    }
     const rest = state.prompt.slice(slash.length).trim();
-    return runSlash({ ...state, prompt: "", cursor: 0 }, slash.slice(1), rest);
-  }
-  const at = atQuery(state.prompt, state.cursor);
-  if (at !== undefined) {
-    const hit = fuzzyFilter(at, state.files)[0];
-    if (hit !== undefined) {
-      const before = state.prompt.slice(0, state.cursor - at.length) + hit.text + " ";
-      const text = before + state.prompt.slice(state.cursor);
-      return { state: { ...state, prompt: text, cursor: before.length }, effects: [] };
-    }
+    return runSlash(
+      { ...state, prompt: "", cursor: 0, completion: undefined },
+      slash.slice(1),
+      rest,
+    );
   }
   const text = state.prompt.trim();
   if (text.length === 0) {
@@ -476,7 +545,7 @@ function sendNow(state: TuiState): DispatchResult {
   if (text === undefined || text.length === 0) return { state, effects: [] };
   const queued = state.prompt.trim().length > 0 ? state.queued : state.queued.slice(1);
   return enqueueOrSend(
-    { ...state, prompt: "", cursor: 0, queued },
+    { ...state, prompt: "", cursor: 0, completion: undefined, queued },
     text,
     true,
   );
@@ -488,6 +557,7 @@ function enqueueOrSend(state: TuiState, text: string, force = false): DispatchRe
     screen: "agent" as const,
     prompt: "",
     cursor: 0,
+    completion: undefined,
     history: [...state.history.filter((item) => item !== text), text],
     historyIndex: -1,
     scrollOffset: 0,
@@ -500,11 +570,10 @@ function enqueueOrSend(state: TuiState, text: string, force = false): DispatchRe
 
 function sendText(state: TuiState, text: string): DispatchResult {
   if (!state.ready) {
+    const restored = syncCompletion({ ...state, prompt: text, cursor: text.length });
     return {
       state: {
-        ...state,
-        prompt: text,
-        cursor: text.length,
+        ...restored,
         toast: { message: state.launchError || "Still starting Chrome…", until: state.now + 2000 },
       },
       effects: [],

@@ -40,7 +40,7 @@ Normal commands fail with a clear error if the saved session is no longer authen
 pnpm cli
 ```
 
-Interactive mode is a fullscreen TUI modeled on [Grok Build](https://github.com/xai-org/grok-build): Oscura Midnight chrome, a welcome spark, conversation scrollback, a rounded composer, slash-command and `@` file menus, permission cards, and a tasks pane for subagents. It drives the existing Copilot browser backend; `--print` still runs headlessly.
+Interactive mode is a fullscreen TUI with an original Waypoint navigation theme: a responsive triangle-and-compass mark, matte neutral-black surfaces, a blue interaction hierarchy, conversation scrollback, a rounded composer, slash-command and `@` file menus, permission cards, and a tasks pane for subagents. Unicode-capable terminals get the full visual treatment, while limited terminals use compact ASCII marks and `NO_COLOR` is respected. Set `TUI_TRANSPARENT=1` to keep the terminal's configured background instead of painting the matte base. It drives the existing Copilot browser backend; `--print` still runs headlessly.
 
 Agent mode is the default. The harness starts a fresh Copilot conversation, injects a coding-specific system prompt, detects structured tool calls, executes them locally, returns the results to Copilot, and repeats until Copilot gives a final answer.
 
@@ -202,6 +202,7 @@ try {
 | `SUBAGENT_MAX_CONCURRENT` | `2` | Subagent conversations allowed to generate at the same time |
 | `SUBAGENT_MAX_IDLE_TABS` | `2` | Finished subagent tabs kept open for follow-ups before the stalest is closed |
 | `SUBAGENT_MAX_STEPS` | `16` | Tool-loop step limit inside one subagent task |
+| `TUI_TRANSPARENT` | unset | Set to `1` to preserve the terminal's default background behind base TUI cells |
 | `PORT` | `8787` | HTTP server port |
 
 ## Selector discovery

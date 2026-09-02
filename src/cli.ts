@@ -230,25 +230,21 @@ async function print(options: CliOptions): Promise<void> {
   if (!task) throw new Error("Print mode requires a task after --print or on stdin");
 
   const client = await CopilotClient.launch();
-  if (options.rawChat) {
-    try {
-      stdout.write(`${await client.sendAndWait(task)}\n`);
-    } finally {
-      await client.close();
-    }
-    return;
-  }
-  const confirmTool = approvalPrompt(options.autoApprove);
-  const manager = createSubagentManager(client, options, confirmTool, stderr);
-  const agent = new CodingAgent(client, {
-    cwd: options.cwd,
-    allowedRoots: options.allowedRoots,
-    readOnly: options.readOnly,
-    confirmTool,
-    onEvent: eventPrinter(stderr),
-    tools: await createOrchestratorTools(manager, options.cwd, options.allowedRoots),
-  });
   try {
+    if (options.rawChat) {
+      stdout.write(`${await client.sendAndWait(task)}\n`);
+      return;
+    }
+    const confirmTool = approvalPrompt(options.autoApprove);
+    const manager = createSubagentManager(client, options, confirmTool, stderr);
+    const agent = new CodingAgent(client, {
+      cwd: options.cwd,
+      allowedRoots: options.allowedRoots,
+      readOnly: options.readOnly,
+      confirmTool,
+      onEvent: eventPrinter(stderr),
+      tools: await createOrchestratorTools(manager, options.cwd, options.allowedRoots),
+    });
     stdout.write(`${await agent.run(task)}\n`);
   } finally {
     await client.close();
