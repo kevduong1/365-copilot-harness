@@ -1,7 +1,7 @@
 export class NotLoggedInError extends Error {
   override name = "NotLoggedInError";
 
-  constructor(message = "Microsoft login is required; run: pnpm cli login") {
+  constructor(message = "Microsoft login is required; run: pnpm copilot365 login") {
     super(message);
   }
 }

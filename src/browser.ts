@@ -110,7 +110,7 @@ export async function ensureLoggedIn(
 
     if (!options.waitForLogin && Date.now() >= initialDeadline) {
       throw new NotLoggedInError(
-        `Copilot's chat input did not appear at ${page.url()}; run: pnpm cli login`,
+        `Copilot's chat input did not appear at ${page.url()}; run: pnpm copilot365 login`,
       );
     }
 

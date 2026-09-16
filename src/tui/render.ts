@@ -121,7 +121,7 @@ function renderWelcome(
     h: Math.max(1, promptBox.y - OUTER_VPAD - 1),
   };
 
-  buf.text(OUTER_HPAD, OUTER_VPAD, "Copilot", { fg: theme.textPrimary, bold: true });
+  buf.text(OUTER_HPAD, OUTER_VPAD, "copilot365", { fg: theme.textPrimary, bold: true });
   const cwd = truncate(formatCwd(state.cwd, state.home), Math.max(8, cols - 24));
   buf.text(OUTER_HPAD + 9, OUTER_VPAD, cwd, { fg: theme.gray });
 
@@ -145,7 +145,7 @@ function renderWelcome(
       });
     });
     menuY += art.length + 1;
-    const word = "M365 Harness";
+    const word = "copilot365";
     buf.text(Math.max(body.x, body.x + Math.floor((body.w - stringWidth(word)) / 2)), menuY, word, {
       fg: theme.textPrimary,
       bold: true,

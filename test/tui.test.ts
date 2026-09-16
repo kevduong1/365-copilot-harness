@@ -403,7 +403,7 @@ test("welcome frame paints the Waypoint mark, harness wordmark, and prompt place
   const state = readyState();
   const frame = renderFrame({ ...state, ready: true, now: 0 }, 80, 28);
   const dump = frame.buffer.dump();
-  assert.ok(dump.includes("M365 Harness"));
+  assert.ok(dump.includes("copilot365"));
   assert.ok(dump.includes("◇"));
   assert.ok(dump.includes("Build anything") || dump.includes("New session"));
   assert.ok(dump.includes("enter send") || dump.includes("↵"));

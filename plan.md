@@ -1,4 +1,4 @@
-# M365 Copilot Browser Harness — Phase 1 MVP Plan
+# copilot365 — Phase 1 MVP Plan
 
 > Historical design document. The implementation now includes the coding-agent phase, token estimation, and context compaction; see `README.md` for current behavior and configuration.
 
@@ -66,7 +66,7 @@ export const config = {
 - `openSession(): Promise<{ context: BrowserContext; page: Page }>` using
   `chromium.launchPersistentContext(config.profileDir, { headless, channel: "chrome", viewport: null, args: ["--disable-blink-features=AutomationControlled"] })`.
   Persistent profile = manual Microsoft SSO/MFA once, cookies survive restarts.
-- `ensureLoggedIn(page)`: navigate to `copilotUrl`, wait for either the chat input (success) or a URL matching `loginUrlPattern` (needs login). If login needed and running under `cli login`, print instructions and **wait indefinitely** for the chat input to appear (user completes SSO by hand); otherwise throw a clear `NotLoggedInError("run: pnpm cli login")`.
+- `ensureLoggedIn(page)`: navigate to `copilotUrl`, wait for either the chat input (success) or a URL matching `loginUrlPattern` (needs login). If login needed and running under `copilot365 login`, print instructions and **wait indefinitely** for the chat input to appear (user completes SSO by hand); otherwise throw a clear `NotLoggedInError("run: pnpm copilot365 login")`.
 - Headful is the default even in normal operation — more robust against bot detection; `HEADLESS=1` exists as an experiment flag.
 - Graceful shutdown: close context on SIGINT so the profile isn't corrupted.
 
@@ -157,7 +157,7 @@ await client.close();
 
 ### 9. CLI REPL (`src/cli.ts`)
 
-Primary dev/debug tool. `pnpm cli`:
+Primary dev/debug tool. `pnpm copilot365`:
 - Subcommand `login`: headful launch, navigate, wait for manual SSO, confirm, exit.
 - Default: readline REPL — type a prompt, deltas stream to stdout; commands `/new`, `/quit`.
 
@@ -182,8 +182,8 @@ Throwaway discovery script, run logged-in: dumps the accessibility tree (`page.a
 
 ## Milestones (build order)
 
-1. **Scaffold** — pnpm init, TS strict ESM, Playwright + chrome channel installed, `.gitignore`, scripts (`cli`, `server`, `spike`, `typecheck`) wired via tsx.
-2. **Session + login** — persistent context launches; `pnpm cli login` completes manual SSO; relaunch is already authenticated.
+1. **Scaffold** — pnpm init, TS strict ESM, Playwright + chrome channel installed, `.gitignore`, scripts (`copilot365`, `server`, `spike`, `typecheck`) wired via tsx.
+2. **Session + login** — persistent context launches; `pnpm copilot365 login` completes manual SSO; relaunch is already authenticated.
 3. **Selector spike** — run `spike.ts` against the live UI; land verified locators in `selectors.ts`.
 4. **Round-trip** — `sendAndWait("Reply with exactly: PONG")` returns `PONG`.
 5. **Streaming + extraction hardening** — delta polling, turndown code-block fidelity, stability debounce, timeouts, retry.
@@ -201,7 +201,7 @@ Throwaway discovery script, run logged-in: dumps the accessibility tree (`page.a
 
 ## Verification
 
-- `pnpm cli login` → complete SSO manually → relaunch `pnpm cli` → no login redirect.
+- `pnpm copilot365 login` → complete SSO manually → relaunch `pnpm copilot365` → no login redirect.
 - REPL: `Reply with exactly the word PONG` → streamed output prints `PONG`.
 - Code fidelity: ask for a Python fibonacci function → response contains a proper fenced code block with language hint, not flattened text.
 - Multi-turn: second REPL message references the first ("shorten your last answer") → context held; `/new` → context dropped.

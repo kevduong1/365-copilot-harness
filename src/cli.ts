@@ -90,9 +90,9 @@ function parseArgs(args: string[]): CliOptions {
 
 function printHelp(): void {
   console.log(`Usage:
-  pnpm cli login
-  pnpm cli [--cwd DIR] [--add-dir DIR ...] [--read-only] [--yes]
-  pnpm cli [options] --print "TASK"
+  pnpm copilot365 login
+  pnpm copilot365 [--cwd DIR] [--add-dir DIR ...] [--read-only] [--yes]
+  pnpm copilot365 [options] --print "TASK"
 
 Interactive sessions use a fullscreen TUI (requires a TTY). Use --print for scripts.
 

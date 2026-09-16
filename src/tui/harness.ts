@@ -161,7 +161,7 @@ export class TuiHarness {
       if (this.closing) return;
       const message =
         error instanceof NotLoggedInError
-          ? "Not logged in. Run pnpm cli login, or /login here."
+          ? "Not logged in. Run pnpm copilot365 login, or /login here."
           : displayedError(error);
       this.setState((state) => ({
         ...state,

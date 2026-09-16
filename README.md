@@ -1,6 +1,8 @@
-# M365 Copilot Browser Harness
+# copilot365
 
-An experimental TypeScript bridge that treats the Microsoft 365 Copilot chat website as a model backend. It provides:
+An experimental browser-backed M365 Copilot coding agent and OpenAI-compatible shim. See [INSTALLATION.md](INSTALLATION.md) for the complete installation and setup guide.
+
+It treats the Microsoft 365 Copilot chat website as a model backend. It provides:
 
 - a `CopilotClient` library with streaming and non-streaming sends;
 - a coding-agent loop with local repository tools;
@@ -29,17 +31,17 @@ pnpm install
 ## First login
 
 ```sh
-pnpm cli login
+pnpm copilot365 login
 ```
 
 A visible Chrome window opens. Complete SSO and MFA manually. When the Copilot chat input is visible, the command confirms login and closes Chrome. That close is expected. Session data is retained under `.data/profile/`, with an explicit cookie snapshot in `.data/storage-state.json`; both are ignored by Git and should be treated as credentials.
 
-Normal commands fail with a clear error if the saved session is no longer authenticated. Run `pnpm cli login` again to refresh it.
+Normal commands fail with a clear error if the saved session is no longer authenticated. Run `pnpm copilot365 login` again to refresh it.
 
 ## Coding agent CLI
 
 ```sh
-pnpm cli
+pnpm copilot365
 ```
 
 Interactive mode is a fullscreen TUI with an original Waypoint navigation theme: a responsive triangle-and-compass mark, matte neutral-black surfaces, a blue interaction hierarchy, conversation scrollback, a rounded composer, slash-command and `@` file menus, permission cards, and a tasks pane for subagents. Unicode-capable terminals get the full visual treatment, while limited terminals use compact ASCII marks and `NO_COLOR` is respected. Set `TUI_TRANSPARENT=1` to keep the terminal's configured background instead of painting the matte base. It drives the existing Copilot browser backend; `--print` still runs headlessly.
@@ -73,14 +75,14 @@ The harness protocol is also more forgiving. Requests wrapped in Markdown code f
 Start directly in another repository:
 
 ```sh
-pnpm cli --cwd /Users/kevin/repos/ai/.talos-worktrees/atc-gan/test
+pnpm copilot365 --cwd /Users/kevin/repos/ai/.talos-worktrees/atc-gan/test
 ```
 
 To let one session move between this repository and other projects, grant one or more additional roots. The coding agent can then call `cd` itself:
 
 ```sh
-pnpm cli --add-dir /Users/kevin/repos/ai
-pnpm cli --add-dir /Users/kevin/repos/ai --add-dir /Users/kevin/repos/another-project
+pnpm copilot365 --add-dir /Users/kevin/repos/ai
+pnpm copilot365 --add-dir /Users/kevin/repos/ai --add-dir /Users/kevin/repos/another-project
 ```
 
 An additional grant includes its descendants. Without `--add-dir`, attempts to read paths outside `--cwd` (or the launch directory) remain blocked. Prefer granting the narrowest directory that covers the task.
@@ -105,19 +107,19 @@ Microsoft does not expose the selected model's tokenizer, the hidden prompt over
 Start a read-only agent:
 
 ```sh
-pnpm cli --read-only
+pnpm copilot365 --read-only
 ```
 
 Automatically approve mutating tools for the current process:
 
 ```sh
-pnpm cli --yes
+pnpm copilot365 --yes
 ```
 
 Use non-interactive print mode for scripting or evaluation. Mutating calls are declined unless `--yes` is supplied:
 
 ```sh
-pnpm cli --read-only --print "Inspect this repository and summarize how it works"
+pnpm copilot365 --read-only --print "Inspect this repository and summarize how it works"
 ```
 
 Add `--chat` to either interactive or print mode to bypass the coding loop and use the raw browser transport.
