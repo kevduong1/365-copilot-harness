@@ -1,7 +1,5 @@
 import { spawn } from "node:child_process";
-import { constants as fsConstants } from "node:fs";
 import {
-  access,
   mkdir,
   readFile,
   readdir,
@@ -20,6 +18,13 @@ import {
   sep,
 } from "node:path";
 import { config } from "../config.js";
+import {
+  PLAIN_OUTPUT_ENV,
+  killProcessTree,
+  resolveShell,
+  shellInvocation,
+  shellSyntaxNote,
+} from "../platform.js";
 import { JobManager, createJobTools } from "./jobs.js";
 import { createPatchTool } from "./patch.js";
 import { createSkillTool } from "./skills.js";
@@ -211,6 +216,8 @@ interface ProcessOptions {
   timeoutMs?: number;
   stdin?: string;
   signal?: AbortSignal;
+  /** Hand the argv to cmd.exe untouched; see `shellInvocation`. */
+  windowsVerbatimArguments?: boolean;
 }
 
 function isSpawnEnoent(error: unknown): boolean {
@@ -219,24 +226,6 @@ function isSpawnEnoent(error: unknown): boolean {
     "code" in error &&
     (error as NodeJS.ErrnoException).code === "ENOENT"
   );
-}
-
-let cachedShell: string | undefined;
-
-async function resolveShell(): Promise<string> {
-  if (cachedShell !== undefined) return cachedShell;
-  const fromEnvironment = process.env.SHELL;
-  if (fromEnvironment !== undefined && fromEnvironment !== "") {
-    try {
-      await access(fromEnvironment, fsConstants.X_OK);
-      cachedShell = fromEnvironment;
-      return cachedShell;
-    } catch {
-      // Fall through to the platform default.
-    }
-  }
-  cachedShell = process.platform === "darwin" ? "/bin/zsh" : "/bin/bash";
-  return cachedShell;
 }
 
 async function runProcess(
@@ -250,16 +239,12 @@ async function runProcess(
     const child = spawn(command, args, {
       cwd: options.cwd,
       detached: useProcessGroup,
+      windowsVerbatimArguments: options.windowsVerbatimArguments ?? false,
+      windowsHide: true,
       // stdin is always piped and closed immediately, so a command that reads
       // it sees EOF instead of hanging on an inherited terminal.
       stdio: ["pipe", "pipe", "pipe"],
-      env: {
-        ...process.env,
-        NO_COLOR: "1",
-        TERM: "dumb",
-        PAGER: "cat",
-        GIT_PAGER: "cat",
-      },
+      env: { ...process.env, ...PLAIN_OUTPUT_ENV },
     });
 
     let stdout = "";
@@ -267,14 +252,8 @@ async function runProcess(
     let status: ProcessOutcome["status"] = "exited";
     let forceKillTimer: NodeJS.Timeout | undefined;
 
-    const kill = (signal: NodeJS.Signals): void => {
-      try {
-        if (useProcessGroup && child.pid !== undefined) process.kill(-child.pid, signal);
-        else child.kill(signal);
-      } catch {
-        // The process may have exited between the decision and this signal.
-      }
-    };
+    const kill = (signal: NodeJS.Signals): void =>
+      killProcessTree(child, signal, { processGroup: useProcessGroup });
     const terminate = (reason: "timeout" | "aborted"): void => {
       if (status !== "exited") return;
       status = reason;
@@ -804,6 +783,8 @@ export async function createWorkspaceTools(
   };
 
   const retained = new RetainedOutputs();
+  const shell = resolveShell();
+  const syntaxNote = shellSyntaxNote(shell);
 
   const readRetainedOutput = (id: number, offset: number, limit: number): string => {
     const content = retained.get(id);
@@ -1117,7 +1098,7 @@ export async function createWorkspaceTools(
     {
       name: "bash",
       description:
-        "Run a shell command in the workspace: tests, builds, git, and anything without a dedicated operation. Output is trimmed head and tail; the full text stays readable at harness://output/<id>.",
+        `Run a shell command in the workspace: tests, builds, git, and anything without a dedicated operation. Output is trimmed head and tail; the full text stays readable at harness://output/<id>.${syntaxNote ? ` ${syntaxNote}` : ""}`,
       parameters: "command, timeout_ms?=30000, stdin?, cwd?",
       mutates: true,
       execute: async (args, context?: ToolExecutionContext) => {
@@ -1134,10 +1115,11 @@ export async function createWorkspaceTools(
           }
         }
 
-        const shell = await resolveShell();
-        const result = await runProcess(shell, ["-lc", command], {
+        const invocation = shellInvocation(shell, command);
+        const result = await runProcess(invocation.command, invocation.args, {
           cwd: directory,
           timeoutMs,
+          windowsVerbatimArguments: invocation.windowsVerbatimArguments,
           ...(stdin === undefined ? {} : { stdin }),
           ...(context?.signal === undefined ? {} : { signal: context.signal }),
         });

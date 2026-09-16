@@ -51,3 +51,4 @@ export type {
   ToolDefinition,
   ToolResult,
 } from "./agent/types.js";
+export { resolveShell, type ShellFamily, type ShellSpec } from "./platform.js";

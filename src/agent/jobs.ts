@@ -1,5 +1,13 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { stat } from "node:fs/promises";
+import {
+  PLAIN_OUTPUT_ENV,
+  killProcessTree,
+  resolveShell,
+  shellInvocation,
+  shellSpecFromCommand,
+  type ShellSpec,
+} from "../platform.js";
 import type { PathResolver } from "./tools.js";
 import type { ToolDefinition } from "./types.js";
 
@@ -23,8 +31,11 @@ export interface JobRecord {
 
 export interface JobManagerOptions {
   resolver: PathResolver;
-  /** Shell used to run commands; defaults to $SHELL, then /bin/zsh or /bin/bash. */
-  shell?: string;
+  /**
+   * Shell used to run commands. Defaults to `HARNESS_SHELL`, then `$SHELL`,
+   * then zsh or bash on POSIX and Git Bash or cmd.exe on Windows.
+   */
+  shell?: string | ShellSpec;
   /** Concurrently running jobs allowed before `job_start` refuses. */
   maxJobs?: number;
   /** Characters of captured output retained per job before the oldest is dropped. */
@@ -119,12 +130,6 @@ interface JobEntry {
   stderr: StreamSanitizer;
 }
 
-function defaultShell(): string {
-  const fromEnvironment = process.env.SHELL;
-  if (fromEnvironment !== undefined && fromEnvironment.length > 0) return fromEnvironment;
-  return process.platform === "darwin" ? "/bin/zsh" : "/bin/bash";
-}
-
 function abbreviate(command: string): string {
   const flattened = command.replace(/\s+/g, " ").trim();
   if (flattened.length <= NAME_LENGTH) return flattened || "job";
@@ -139,14 +144,19 @@ function abbreviate(command: string): string {
 export class JobManager {
   private readonly entries = new Map<number, JobEntry>();
   private readonly resolver: PathResolver;
-  private readonly shell: string;
+  private readonly shell: ShellSpec;
   private readonly maxJobs: number;
   private readonly maxBufferChars: number;
   private nextId = 1;
 
   constructor(options: JobManagerOptions) {
     this.resolver = options.resolver;
-    this.shell = options.shell ?? defaultShell();
+    this.shell =
+      options.shell === undefined
+        ? resolveShell()
+        : typeof options.shell === "string"
+          ? shellSpecFromCommand(options.shell)
+          : options.shell;
     this.maxJobs = options.maxJobs ?? DEFAULT_MAX_JOBS;
     this.maxBufferChars = options.maxBufferChars ?? DEFAULT_MAX_BUFFER_CHARS;
   }
@@ -204,11 +214,14 @@ export class JobManager {
     };
     this.entries.set(id, entry);
 
-    const child = spawn(this.shell, ["-lc", command], {
+    const invocation = shellInvocation(this.shell, command);
+    const child = spawn(invocation.command, invocation.args, {
       cwd: directory,
       detached: useProcessGroup,
+      windowsVerbatimArguments: invocation.windowsVerbatimArguments,
+      windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env, NO_COLOR: "1", TERM: "dumb", PAGER: "cat", GIT_PAGER: "cat" },
+      env: { ...process.env, ...PLAIN_OUTPUT_ENV },
     });
     entry.child = child;
     if (child.pid !== undefined) entry.record.pid = child.pid;
@@ -326,12 +339,7 @@ export class JobManager {
   private signal(entry: JobEntry, signal: NodeJS.Signals): void {
     const child = entry.child;
     if (child === undefined) return;
-    try {
-      if (process.platform !== "win32" && child.pid !== undefined) process.kill(-child.pid, signal);
-      else child.kill(signal);
-    } catch {
-      // The job may have exited between the status check and this signal.
-    }
+    killProcessTree(child, signal, { processGroup: process.platform !== "win32" });
   }
 
   private append(entry: JobEntry, text: string): void {

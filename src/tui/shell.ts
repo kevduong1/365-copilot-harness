@@ -1,5 +1,6 @@
 import { spawn, type ChildProcessByStdio } from "node:child_process";
 import type { Readable } from "node:stream";
+import { PLAIN_OUTPUT_ENV, killProcessTree, resolveShell, shellInvocation } from "../platform.js";
 
 export const SHELL_TIMEOUT_MS = 60_000;
 export const SHELL_OUTPUT_LIMIT = 20_000;
@@ -26,9 +27,7 @@ export function loginShell(
   env: NodeJS.ProcessEnv = process.env,
   platform: NodeJS.Platform = process.platform,
 ): string {
-  const configured = env.SHELL?.trim();
-  if (configured) return configured;
-  return platform === "darwin" ? "/bin/zsh" : "/bin/bash";
+  return resolveShell(env, platform).command;
 }
 
 // CSI/OSC and the other escape forms a TTY-unaware program still emits into a
@@ -61,7 +60,9 @@ export async function runShellCommand(
 ): Promise<ShellResult> {
   const timeoutMs = options.timeoutMs ?? SHELL_TIMEOUT_MS;
   const limit = options.limit ?? SHELL_OUTPUT_LIMIT;
-  const shell = loginShell(options.env ?? process.env, options.platform ?? process.platform);
+  const platform = options.platform ?? process.platform;
+  const shell = resolveShell(options.env ?? process.env, platform);
+  const invocation = shellInvocation(shell, command);
 
   return await new Promise<ShellResult>((resolve) => {
     let settled = false;
@@ -78,19 +79,15 @@ export async function runShellCommand(
 
     // A `!cmd &` line leaves a background process holding the pipes, so the
     // shell alone is not what has to be killed: the whole group is.
-    const useProcessGroup = (options.platform ?? process.platform) !== "win32";
+    const useProcessGroup = platform !== "win32";
     let child: ChildProcessByStdio<null, Readable, Readable>;
     try {
-      child = spawn(shell, ["-lc", command], {
+      child = spawn(invocation.command, invocation.args, {
         ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
         detached: useProcessGroup,
-        env: {
-          ...(options.env ?? process.env),
-          NO_COLOR: "1",
-          TERM: "dumb",
-          PAGER: "cat",
-          GIT_PAGER: "cat",
-        },
+        windowsVerbatimArguments: invocation.windowsVerbatimArguments,
+        windowsHide: true,
+        env: { ...(options.env ?? process.env), ...PLAIN_OUTPUT_ENV },
         stdio: ["ignore", "pipe", "pipe"],
       });
     } catch (error) {
@@ -105,14 +102,8 @@ export async function runShellCommand(
     child.stderr?.on("data", (chunk: string) => chunks.push(chunk));
 
     let killTimer: NodeJS.Timeout | undefined;
-    const kill = (signal: NodeJS.Signals): void => {
-      try {
-        if (useProcessGroup && child.pid !== undefined) process.kill(-child.pid, signal);
-        else child.kill(signal);
-      } catch {
-        // The group may have exited between the decision and this signal.
-      }
-    };
+    const kill = (signal: NodeJS.Signals): void =>
+      killProcessTree(child, signal, { processGroup: useProcessGroup, platform });
     const timer = setTimeout(() => {
       timedOut = true;
       kill("SIGTERM");

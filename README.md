@@ -18,6 +18,7 @@ It drives your installed Google Chrome through Playwright. Microsoft credentials
 - pnpm
 - Google Chrome
 - an account with access to Microsoft 365 Copilot chat
+- on Windows, [Git for Windows](https://gitforwindows.org/) is strongly recommended: its Git Bash is used for shell commands so the agent's POSIX habits keep working. Without it the harness falls back to `cmd.exe`. Use Windows Terminal or another VT-capable terminal for the TUI.
 
 Install dependencies:
 
@@ -53,7 +54,7 @@ Built-in tools are `pwd`, `cd`, `read`, `grep`, `find`, `ls`, `edit`, `patch`, `
 
 ### Terminal capabilities
 
-`bash` runs commands through your login shell (`$SHELL`, falling back to `/bin/zsh` or `/bin/bash`) with `NO_COLOR`, `TERM=dumb`, and pagers disabled, and strips ANSI escapes from the output. It accepts `stdin` and a `cwd` inside a granted root. A command that hits its timeout, or is cancelled from the TUI, no longer loses its output: the observation reports `exit_code: timeout` or `exit_code: aborted` together with everything captured so far.
+`bash` runs commands through your login shell with `NO_COLOR`, `TERM=dumb`, and pagers disabled, and strips ANSI escapes from the output. The shell is `HARNESS_SHELL` if set, otherwise `$SHELL`, falling back to `/bin/zsh` on macOS and `/bin/bash` elsewhere. On Windows it is Git Bash when Git for Windows is installed (found through `EXEPATH`, `ProgramFiles`, or `LOCALAPPDATA\Programs`), otherwise `cmd.exe` from `COMSPEC`; the tool description then tells Copilot which syntax to use. The same shell serves `job_start` and TUI `!` lines. On Windows a timed-out or cancelled command is stopped with `taskkill /t /f`, which ends the whole process tree immediately rather than gracefully. It accepts `stdin` and a `cwd` inside a granted root. A command that hits its timeout, or is cancelled from the TUI, no longer loses its output: the observation reports `exit_code: timeout` or `exit_code: aborted` together with everything captured so far.
 
 Long output is trimmed head and tail rather than head only, so the end of a failing test run survives. The cap is `TOOL_OUTPUT_MAX_CHARS` (default 24,000 characters, sized for Copilot's small context window). The complete text of the last 20 trimmed outputs is retained in memory and referenced as `harness://output/<id>`; `read` accepts that path with `offset` and `limit`, so the model can page through the full output without the controller writing files.
 
@@ -256,6 +257,7 @@ try {
 | `SUBAGENT_MAX_IDLE_TABS` | `2` | Finished subagent tabs kept open for follow-ups before the stalest is closed |
 | `SUBAGENT_MAX_STEPS` | `16` | Tool-loop step limit inside one subagent task |
 | `TOOL_OUTPUT_MAX_CHARS` | `24000` | Head-plus-tail cap on any single tool output; the full text stays readable at `harness://output/<id>` |
+| `HARNESS_SHELL` | unset | Shell executable for `bash`, `job_start`, and `!` lines; overrides `$SHELL` and the Git Bash / `cmd.exe` detection on Windows |
 | `TUI_TRANSPARENT` | unset | Set to `1` to preserve the terminal's default background behind base TUI cells |
 | `PORT` | `8787` | HTTP server port |
 

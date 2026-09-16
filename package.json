@@ -12,7 +12,7 @@
     "server": "tsx src/server.ts",
     "spike": "tsx src/spike.ts",
     "typecheck": "tsc --noEmit",
-    "test": "node --import tsx --test test/*.test.ts"
+    "test": "node --import tsx --test \"test/*.test.ts\""
   },
   "dependencies": {
     "@hono/node-server": "^1.19.1",

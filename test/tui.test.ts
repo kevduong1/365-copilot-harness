@@ -624,6 +624,8 @@ test("shell passthrough helpers pick a login shell and bound their output", () =
   assert.equal(loginShell({ SHELL: "/opt/homebrew/bin/fish" }, "darwin"), "/opt/homebrew/bin/fish");
   assert.equal(loginShell({}, "darwin"), "/bin/zsh");
   assert.equal(loginShell({}, "linux"), "/bin/bash");
+  assert.equal(loginShell({ ProgramFiles: "/nonexistent-program-files" }, "win32"), "cmd.exe");
+  assert.equal(loginShell({ HARNESS_SHELL: "/usr/local/bin/bash" }, "win32"), "/usr/local/bin/bash");
   assert.equal(stripAnsi("\u001B[31mred\u001B[0m"), "red");
 
   const capped = capOutput("a".repeat(50_000));
