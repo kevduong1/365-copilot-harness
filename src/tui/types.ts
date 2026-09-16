@@ -91,10 +91,19 @@ export type ScrollbackEntry =
   | SystemEntry
   | SubagentEntry;
 
+/** What one row of the permission card does: allow once, learn a rule, or decline. */
+export type ApprovalChoice = "allow" | "deny" | "always";
+
+export interface ApprovalOption {
+  label: string;
+  decision: ApprovalChoice;
+}
+
 export interface ApprovalRequest {
   id: number;
   call: ToolCall;
   definition: ToolDefinition;
+  options: ApprovalOption[];
   selected: number;
   expanded: boolean;
 }
@@ -112,6 +121,8 @@ export interface TuiOptions {
   allowedRoots: string[];
   home?: string;
   branch?: string;
+  /** Auto-approve the built-in read-only command allowlist. Defaults to true. */
+  safeAuto?: boolean;
 }
 
 export interface TuiState {
@@ -172,11 +183,16 @@ export type Effect =
   | { type: "compact"; note?: string }
   | { type: "copy"; text: string }
   | { type: "login" }
-  | { type: "approve"; id: number; allow: boolean }
+  | { type: "approve"; id: number; decision: ApprovalChoice }
   | { type: "listTools" }
   | { type: "listSkills" }
   | { type: "refreshAgents" }
+  | { type: "permissions"; action: PermissionAction }
+  | { type: "runShell"; command: string }
   | { type: "toast"; message: string };
+
+/** The `/permissions` subcommands. */
+export type PermissionAction = "show" | "clear" | "safe-on" | "safe-off";
 
 export interface HitRegion {
   id:

@@ -1,4 +1,5 @@
 import { stdin, stdout } from "node:process";
+import { ApprovalPolicy } from "../agent/policy.js";
 import { applyToast, dispatch } from "./dispatch.js";
 import { listProjectFiles } from "./files.js";
 import { TuiHarness, defaultHome, displayedError } from "./harness.js";
@@ -34,7 +35,15 @@ export async function runTui(options: TuiOptions): Promise<void> {
   };
   const getState = (): TuiState => state;
 
-  const harness = new TuiHarness(setState, getState, options.cwd, options.allowedRoots, options.readOnly);
+  const harness = new TuiHarness(
+    setState,
+    getState,
+    options.cwd,
+    options.allowedRoots,
+    options.readOnly,
+    {},
+    new ApprovalPolicy({ autoApproveSafeCommands: options.safeAuto ?? true }),
+  );
 
   const reportAsyncError = (error: unknown): void => {
     setState((current) => applyToast(current, displayedError(error), 4_000));
@@ -75,8 +84,11 @@ export async function runTui(options: TuiOptions): Promise<void> {
         terminal.copy(effect.text);
         setState((current) => applyToast(current, "Copied!"));
       }
-      if (effect.type === "approve") harness.resolveApproval(effect.id, effect.allow);
+      if (effect.type === "approve") harness.resolveApproval(effect.id, effect.decision);
       if (effect.type === "cancel") harness.cancel();
+      if (effect.type === "permissions") harness.applyPermissions(effect.action);
+      // A `!` line runs alongside a turn instead of waiting for the send queue.
+      if (effect.type === "runShell") void harness.runShell(effect.command).catch(reportAsyncError);
       if (effect.type === "listTools") {
         await harness.refreshTools();
         setState((current) => {

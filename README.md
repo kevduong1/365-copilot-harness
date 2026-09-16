@@ -45,9 +45,29 @@ Interactive mode is a fullscreen TUI with an original Waypoint navigation theme:
 
 Agent mode is the default. The harness starts a fresh Copilot conversation, injects a coding-specific system prompt, detects structured tool calls, executes them locally, returns the results to Copilot, and repeats until Copilot gives a final answer.
 
-Built-in tools are `pwd`, `cd`, `read`, `grep`, `find`, `ls`, `edit`, `write`, `bash`, `skill` (on-demand skills, described below), and `agent` (subagent delegation, described below). `cd` changes the controller's working directory persistently, so later file and shell operations run from the selected project. File tools are restricted to explicitly granted roots, including symlink resolution. `edit`, `write`, and `bash` require interactive approval by default.
+Built-in tools are `pwd`, `cd`, `read`, `grep`, `find`, `ls`, `edit`, `patch`, `write`, `bash`, the background job operations `job_start`, `job_output`, `job_wait`, `job_kill`, and `job_list`, `skill` (on-demand skills, described below), and `agent` (subagent delegation, described below). `cd` changes the controller's working directory persistently, so later file and shell operations run from the selected project. File tools are restricted to explicitly granted roots, including symlink resolution. `edit`, `patch`, `write`, `bash`, `job_start`, and `job_kill` require interactive approval by default, subject to the permission rules described below.
 
-`edit` supports a unique exact replacement (`old_text`/`new_text`), an intentional `replace_all`, or an inclusive `start_line`/`end_line` replacement based on the numbered output from `read`. The command also accepts common camelCase and `old_string`/`new_string` aliases, which makes prompted tool calls less brittle without weakening path validation or approvals.
+`edit` supports a unique exact replacement (`old_text`/`new_text`), an intentional `replace_all`, or an inclusive `start_line`/`end_line` replacement based on the numbered output from `read`. The command also accepts common camelCase and `old_string`/`new_string` aliases, which makes prompted tool calls less brittle without weakening path validation or approvals. When `old_text` does not match exactly, `edit` retries ignoring trailing whitespace and then ignoring indentation (as long as the match stays unique), re-indents the replacement to match the file, preserves CRLF line endings, and returns a numbered snippet of the changed region so the model can verify without another read.
+
+`patch` applies a unified diff across one or more files in a single round trip. Hunks are matched by their context rather than by `@@` line numbers, trailing whitespace is ignored, `/dev/null` creates or deletes files, and the whole diff is rejected before anything is written if any hunk fails to match. Because every tool call is a slow browser round trip, the system prompt steers Copilot toward `patch` for changes that span several places.
+
+### Terminal capabilities
+
+`bash` runs commands through your login shell (`$SHELL`, falling back to `/bin/zsh` or `/bin/bash`) with `NO_COLOR`, `TERM=dumb`, and pagers disabled, and strips ANSI escapes from the output. It accepts `stdin` and a `cwd` inside a granted root. A command that hits its timeout, or is cancelled from the TUI, no longer loses its output: the observation reports `exit_code: timeout` or `exit_code: aborted` together with everything captured so far.
+
+Long output is trimmed head and tail rather than head only, so the end of a failing test run survives. The cap is `TOOL_OUTPUT_MAX_CHARS` (default 24,000 characters, sized for Copilot's small context window). The complete text of the last 20 trimmed outputs is retained in memory and referenced as `harness://output/<id>`; `read` accepts that path with `offset` and `limit`, so the model can page through the full output without the controller writing files.
+
+Long-lived processes run as background jobs. `job_start` launches a dev server, watcher, or slow test suite in its own process group and returns immediately; `job_output` returns the status and any output since the previous read; `job_wait` blocks until exit or a timeout; `job_kill` stops the process group; `job_list` shows every job. Output is kept in a bounded buffer per job, and all jobs are killed when the CLI exits.
+
+`grep` and `find` use ripgrep when it is installed and otherwise fall back to a built-in walker that skips `.git`, `node_modules`, and root `.gitignore` entries, with the same `file:line:col:text` output. `grep` also accepts `ignore_case`, `fixed_strings`, `context`, and `files_only`. `read` rejects binary files, refuses files above 50 MB, and truncates individual lines longer than 2,000 characters.
+
+### Permissions
+
+The permission card offers three answers: allow once, decline, or always allow. "Always allow" learns a session rule: for `bash` and `job_start` it is a command prefix such as `git commit` or `pnpm test` (the first word, plus the subcommand for `git`, `pnpm`, `npm`, `yarn`, `cargo`, `go`, `docker`, `make`, and `node`), scoped to the tool that learned it, and for other tools it is the tool name. Prefix rules match only at word boundaries and only for commands with no shell operators, so `git commit` never covers `git commitx` or `git commit && rm -rf x`. A shell call with a blank command never offers an always-allow option.
+
+A conservative built-in classifier auto-approves read-only shell commands: a single command with no pipes, redirects, chaining, substitutions, environment assignments, or control characters, whose first word is in a small allowlist (`ls`, `cat`, `head`, `tail`, `wc`, `echo`, `which`, `whoami`, `printenv`, `stat`, `grep`, `git status`, `git log`, `git diff`, `git show`, `git branch`, `git rev-parse`, `git remote`, and version or listing flags for `node`, `pnpm`, and `npm`). Arguments are checked too: flags that write or execute, such as `--output`, `-o`, `--ext-diff`, `-c`, `-exec`, or `-delete`, and mutating forms of `git branch` or `git remote` are never auto-approved, and commands that can run other programs (`env`, `find`, `rg`) are deliberately absent. Pass `--no-safe-auto` to ask for those too. `/permissions` prints the active rules, `/permissions clear` forgets session rules, and `/permissions safe on|off` toggles the classifier. Print mode applies the same policy: without `--yes` only safe commands run.
+
+The harness protocol is also more forgiving. Requests wrapped in Markdown code fences, `args`/`params`/`input` in place of `arguments`, missing argument objects, trailing commas, smart quotes, and raw newlines inside JSON strings are all repaired before a protocol error is reported, and a JSON array of requests runs each in order. Observations echo only a compact summary of each call's arguments, so a large `write` or `patch` no longer costs its payload twice.
 
 Start directly in another repository:
 
@@ -67,12 +87,14 @@ An additional grant includes its descendants. Without `--add-dir`, attempts to r
 Useful commands inside the TUI:
 
 - Type `/` for the command menu. `/tools` lists active tools. `/skills` lists discovered skills, and `/skill <name> [request]` asks the agent to apply one.
+- Start a line with `!` to run a shell command locally in the agent's current working directory. The output appears in the scrollback and is never sent to Copilot.
+- `/permissions` (alias `/rules`) shows the session's approval rules; `/permissions clear` and `/permissions safe on|off` adjust them.
 - `/agents` or `Ctrl+G` lists every subagent spawned this session with its status, steps, estimated tokens, and whether its tab is still open.
 - `/context` (alias `/tokens`) shows the estimated conversation usage, assumed context budget, and compaction threshold.
 - `/compact` asks Copilot for a continuation summary, opens a new browser chat, restores the summary, and resumes there.
 - `/new` (or `Ctrl+N` twice) resets the browser conversation and reinjects the coding prompt on the next task.
 - `/chat` switches to the raw browser-chat bridge. `/agent` returns to coding-agent mode. `Shift+Tab` cycles agent / always-approve / chat.
-- Mutating tools open a permission card (`1` allow, `2` decline). `Ctrl+O` or `/always-approve` skips those prompts.
+- Mutating tools open a permission card (`1` allow once, `2` decline, `3` always allow this rule). `Ctrl+O` or `/always-approve` skips those prompts entirely. `Esc` cancels a running turn, aborting the current shell command and any running subagents.
 - `Ctrl+P` or `?` opens the command palette. `Ctrl+X` shows keyboard shortcuts. `/quit` or `Ctrl+Q` twice exits.
 
 The CLI shows an estimated token chip in the TUI status bar after each completed task. Automatic compaction is enabled by default: before a send projected to meet 60% of the configured context budget, the harness summarizes the current conversation and continues it in a fresh chat. In coding-agent mode it also re-injects the original harness system prompt verbatim, so the summary is not responsible for reproducing the tool protocol. Mode switches start a fresh browser conversation to prevent raw chat from contaminating the coding-agent state. The OpenAI-compatible server applies the same automatic policy; low-level `CopilotClient` callers can use `needsCompaction(nextPrompt)` and `compact()` directly.
@@ -233,6 +255,7 @@ try {
 | `SUBAGENT_MAX_CONCURRENT` | `2` | Subagent conversations allowed to generate at the same time |
 | `SUBAGENT_MAX_IDLE_TABS` | `2` | Finished subagent tabs kept open for follow-ups before the stalest is closed |
 | `SUBAGENT_MAX_STEPS` | `16` | Tool-loop step limit inside one subagent task |
+| `TOOL_OUTPUT_MAX_CHARS` | `24000` | Head-plus-tail cap on any single tool output; the full text stays readable at `harness://output/<id>` |
 | `TUI_TRANSPARENT` | unset | Set to `1` to preserve the terminal's default background behind base TUI cells |
 | `PORT` | `8787` | HTTP server port |
 
@@ -260,8 +283,8 @@ pnpm test
 - Copilot prompt limits are much smaller than API context windows. A rejected or truncated prompt raises `PromptTooLargeError`.
 - Token counts and compaction thresholds are estimates because M365 does not expose its tokenizer, model choice, hidden context, or usage. Existing messages already open in the browser before the harness starts are not counted.
 - Compaction is lossy by nature. The prompt emphasizes goals, decisions, exact state, completed work, pending steps, and protocols, but critical information should still live in the repository or another durable artifact.
-- Tool calls use a prompted text protocol rather than a native model API, so malformed calls are reported back to Copilot for correction and the loop is capped at 16 steps.
-- Mutating tools can change repository files or run arbitrary workspace shell commands after approval. Review proposed arguments carefully and use `--read-only` for audits.
+- Tool calls use a prompted text protocol rather than a native model API. Common formatting mistakes are repaired automatically; anything else is reported back to Copilot for correction, and the loop is capped at 16 steps.
+- Mutating tools can change repository files or run arbitrary workspace shell commands after approval. Review proposed arguments carefully, prefer narrow "always allow" rules, and use `--read-only` for audits. The safe-command classifier is deliberately small; it never auto-approves commands with shell operators.
 - Streaming is derived by polling and diffing rendered Markdown. If Copilot rewrites an earlier portion, the authoritative full response is emitted at completion.
 - Each tab is one conversation with one in-flight request. Parallelism comes only from subagent tabs, is bounded by `SUBAGENT_MAX_CONCURRENT`, and shares a single Microsoft account, so concurrent generations may hit tenant rate limits; lower the limit to `1` to serialize subagents.
 - Headful Chrome is the default because it is generally less brittle. Automation may be restricted by Microsoft policy or your organization's terms; confirm that your use is permitted.

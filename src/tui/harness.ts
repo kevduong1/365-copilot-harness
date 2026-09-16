@@ -1,6 +1,14 @@
 import { homedir } from "node:os";
+import {
+  ApprovalPolicy,
+  formatRules,
+  ruleFor,
+  ruleLabel,
+  type ApprovalRule,
+} from "../agent/policy.js";
 import { CodingAgent } from "../agent/runner.js";
 import { discoverSkills, formatSkillList } from "../agent/skills.js";
+import { closeAllJobs } from "../agent/tools.js";
 import {
   SubagentManager,
   createOrchestratorTools,
@@ -10,9 +18,11 @@ import {
 import type { AgentEvent, ConfirmTool, ToolCall, ToolDefinition } from "../agent/types.js";
 import { CopilotClient } from "../client.js";
 import { NotLoggedInError, ResponseTimeoutError } from "../errors.js";
+import { Mutex } from "../queue.js";
 import type { TokenUsageEstimate } from "../tokens.js";
 import { applyToast, makeEntry, patchEntry } from "./dispatch.js";
-import type { TuiState } from "./types.js";
+import { runShellCommand } from "./shell.js";
+import type { ApprovalChoice, ApprovalOption, PermissionAction, TuiState } from "./types.js";
 import { TOOL_DISPLAY_LIMIT } from "./theme.js";
 
 export type StateSetter = (update: (state: TuiState) => TuiState) => void;
@@ -26,12 +36,24 @@ export class TuiHarness {
   client: CopilotClient | undefined;
   agent: CodingAgent | undefined;
   manager: SubagentManager | undefined;
-  private readonly pending = new Map<number, (allow: boolean) => void>();
+  private readonly pending = new Map<
+    number,
+    { resolve: (allow: boolean) => void; rule?: ApprovalRule }
+  >();
+  /**
+   * `state.approval` is a single card, so concurrent requests have to queue.
+   * The orchestrator runs concurrency-safe tools in parallel with sequential
+   * ones, so without this a second request would overwrite the first card and
+   * leave its promise unresolved.
+   */
+  private readonly approvalGate = new Mutex();
   private running: Promise<void> | undefined;
   private launchPromise: Promise<void> | undefined;
   private launchWaitsForLogin = false;
   private cancelled = false;
   private closing = false;
+  /** Follows the agent's `cd` so `!` commands run where the agent is working. */
+  private workspaceCwd: string;
 
   constructor(
     private readonly setState: StateSetter,
@@ -40,7 +62,10 @@ export class TuiHarness {
     private readonly allowedRoots: string[],
     private readonly readOnly: boolean,
     private readonly dependencies: TuiHarnessDependencies = {},
-  ) {}
+    readonly policy: ApprovalPolicy = new ApprovalPolicy(),
+  ) {
+    this.workspaceCwd = cwd;
+  }
 
   launch(waitForLogin = false): Promise<void> {
     if (this.closing || this.client !== undefined) return Promise.resolve();
@@ -92,7 +117,12 @@ export class TuiHarness {
         onEvent: (record, event) => this.onAgentEvent(event, record.id),
         onLifecycle: (record, event) => this.onLifecycle(record, event),
       });
-      const tools = await createTools(manager, this.cwd, this.allowedRoots);
+      const tools = await createTools(manager, this.cwd, this.allowedRoots, {
+        onDirectoryChange: (next) => {
+          this.workspaceCwd = next;
+          this.setState((state) => ({ ...state, cwd: next }));
+        },
+      });
       const agent = new CodingAgent(launchedClient, {
         cwd: this.cwd,
         allowedRoots: this.allowedRoots,
@@ -152,10 +182,14 @@ export class TuiHarness {
     } catch {
       // Browser cleanup still has to run if a UI observer fails during shutdown.
     }
+    // Abort before the references go: a tool still running would otherwise hold
+    // the event loop open long after the terminal has been restored.
+    this.abortActiveRuns("the session is closing");
     const client = this.client;
     this.client = undefined;
     this.agent = undefined;
     this.manager = undefined;
+    await closeAllJobs().catch(() => undefined);
     await client?.close();
   }
 
@@ -174,12 +208,26 @@ export class TuiHarness {
   cancel(): void {
     this.cancelled = true;
     this.declinePendingApprovals();
+    this.abortActiveRuns();
   }
 
-  resolveApproval(id: number, allow: boolean): void {
-    const resolve = this.pending.get(id);
+  /** Stop the step loops and every running tool, for both cancel and shutdown. */
+  private abortActiveRuns(reason = "cancelled by the user"): void {
+    try {
+      this.agent?.abort(reason);
+      this.manager?.cancelAll(reason);
+    } catch {
+      // Best effort: the turn is already marked cancelled either way.
+    }
+  }
+
+  resolveApproval(id: number, decision: ApprovalChoice): void {
+    const entry = this.pending.get(id);
     this.pending.delete(id);
-    resolve?.(allow);
+    if (entry === undefined) return;
+    // A card with no rule to learn offers no "always" row; ignore a stray one.
+    if (decision === "always" && entry.rule !== undefined) this.policy.learn(entry.rule);
+    entry.resolve(decision !== "deny");
   }
 
   async newChat(sessionKind: "agent" | "chat"): Promise<void> {
@@ -304,27 +352,108 @@ export class TuiHarness {
   }
 
   private async requestApproval(call: ToolCall, definition: ToolDefinition): Promise<boolean> {
+    // Auto-decisions are answered outside the queue so they never wait on a card.
+    const settled = this.settleWithoutAsking(call, definition);
+    if (settled !== undefined) return settled;
+    return await this.approvalGate.run(async () => {
+      // A card shown while this one waited may have cancelled the turn or
+      // learned a rule that now covers this call.
+      const now = this.settleWithoutAsking(call, definition);
+      if (now !== undefined) return now;
+      return await this.showApprovalCard(call, definition);
+    });
+  }
+
+  /** An allow/deny that needs no card, or undefined when the user must choose. */
+  private settleWithoutAsking(call: ToolCall, definition: ToolDefinition): boolean | undefined {
     if (this.closing || this.cancelled) return false;
     if (this.getState().permission === "always") return true;
+    if (this.policy.decide(call, definition) === "allow") return true;
+    return undefined;
+  }
+
+  private async showApprovalCard(call: ToolCall, definition: ToolDefinition): Promise<boolean> {
+    const rule = ruleFor(call, definition);
+    // Decline stays on `2`, where it has always been: the persistent grant is
+    // the one answer that must not be reachable by muscle memory.
+    const options: ApprovalOption[] = [
+      { label: "Allow once", decision: "allow" },
+      { label: "Decline", decision: "deny" },
+      ...(rule === undefined
+        ? []
+        : [{ label: `Always allow ${ruleLabel(rule)}`, decision: "always" as const }]),
+    ];
     return await new Promise<boolean>((resolve) => {
       this.setState((state) => {
         const id = state.nextApprovalId;
-        this.pending.set(id, resolve);
+        this.pending.set(id, { resolve, ...(rule === undefined ? {} : { rule }) });
         return {
           ...state,
           nextApprovalId: id + 1,
-          approval: { id, call, definition, selected: 0, expanded: false },
+          approval: { id, call, definition, options, selected: 0, expanded: false },
           turn: "waiting",
         };
       });
     });
   }
 
+  /** Report the session rules, clear them, or toggle the safe-command classifier. */
+  applyPermissions(action: PermissionAction): void {
+    if (action === "clear") this.policy.clear();
+    if (action === "safe-on") this.policy.setAutoApproveSafeCommands(true);
+    if (action === "safe-off") this.policy.setAutoApproveSafeCommands(false);
+    const heading =
+      action === "clear"
+        ? "Cleared the session permission rules.\n"
+        : action === "show"
+          ? ""
+          : `Safe-command auto-approval ${action === "safe-on" ? "enabled" : "disabled"}.\n`;
+    const message = `${heading}${formatRules(this.policy.rules())}`;
+    this.setState((state) =>
+      makeEntry(state, { kind: "system", message, collapsed: false, raw: false }).state,
+    );
+  }
+
+  /** Run a `!command` line locally and show it in the scrollback as a tool entry. */
+  async runShell(command: string): Promise<void> {
+    if (this.closing) return;
+    let id = 0;
+    this.setState((state) => {
+      const made = makeEntry(state, {
+        kind: "tool",
+        call: { name: "shell", arguments: { command } },
+        status: "running",
+        output: "",
+        collapsed: false,
+        raw: false,
+      });
+      id = made.id;
+      return made.state;
+    });
+    let output: string;
+    let ok: boolean;
+    try {
+      const result = await runShellCommand(command, { cwd: this.workspaceCwd });
+      ok = result.ok;
+      output = result.output;
+    } catch (error) {
+      ok = false;
+      output = displayedError(error);
+    }
+    this.setState((state) =>
+      patchEntry(state, id, {
+        status: ok ? "ok" : "error",
+        output: displayedOutput(output),
+        collapsed: output.length > 800,
+      }),
+    );
+  }
+
   private declinePendingApprovals(): void {
     if (this.pending.size === 0 && this.getState().approval === undefined) return;
     const pending = [...this.pending.values()];
     this.pending.clear();
-    for (const resolve of pending) resolve(false);
+    for (const entry of pending) entry.resolve(false);
     this.setState((state) => ({ ...state, approval: undefined }));
   }
 

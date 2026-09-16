@@ -56,6 +56,16 @@ export function slashToken(text: string): string | undefined {
   return token;
 }
 
+/**
+ * The local command behind a `!` passthrough line, or undefined when the prompt
+ * is not one. A bare `!` is ordinary text.
+ */
+export function bangCommand(text: string): string | undefined {
+  if (!text.startsWith("!")) return undefined;
+  const command = text.slice(1).trim();
+  return command.length === 0 ? undefined : command;
+}
+
 export function atQuery(text: string, cursor: number): string | undefined {
   const before = text.slice(0, cursor);
   const match = /(?:^|\s)@([^\s]*)$/.exec(before);

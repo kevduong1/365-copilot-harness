@@ -3,7 +3,7 @@ import test from "node:test";
 import { ScreenBuffer } from "../src/tui/buffer.js";
 import { filterCommands, findCommand } from "../src/tui/commands.js";
 import { activeCompletion, syncCompletion } from "../src/tui/completion.js";
-import { dispatch, runSlash, skillPrompt } from "../src/tui/dispatch.js";
+import { dispatch, permissionAction, runSlash, skillPrompt } from "../src/tui/dispatch.js";
 import {
   blendHex,
   contextGradientHex,
@@ -20,7 +20,8 @@ import { InputParser, key } from "../src/tui/keys.js";
 import { renderMarkdown } from "../src/tui/markdown.js";
 import { insertText } from "../src/tui/prompt.js";
 import { renderFrame } from "../src/tui/render.js";
-import { createState } from "../src/tui/types.js";
+import { capOutput, loginShell, runShellCommand, stripAnsi } from "../src/tui/shell.js";
+import { createState, type ApprovalRequest, type TuiState } from "../src/tui/types.js";
 import { colorRoles, derivedColors, palette, theme } from "../src/tui/theme.js";
 import { pickWaypointMark, waypointSize } from "../src/tui/waypoint.js";
 
@@ -442,6 +443,227 @@ test("prompt insert and fuzzy @ matching stay local to the frontend", () => {
   const hit = fuzzyMatch("agnt", "src/agent/runner.ts");
   assert.ok(hit !== undefined);
   assert.ok((hit?.score ?? 0) > 0);
+});
+
+function approvalState(): TuiState {
+  const approval: ApprovalRequest = {
+    id: 7,
+    call: { name: "bash", arguments: { command: "git commit -m 'ship'" } },
+    definition: {
+      name: "bash",
+      description: "run a shell command",
+      parameters: "command",
+      mutates: true,
+      execute: async () => "",
+    },
+    options: [
+      { label: "Allow once", decision: "allow" },
+      { label: "Decline", decision: "deny" },
+      { label: 'Always allow bash "git commit …"', decision: "always" },
+    ],
+    selected: 0,
+    expanded: false,
+  };
+  return { ...readyState(), ready: true, screen: "agent", turn: "waiting", approval };
+}
+
+test("the permission card keeps decline on 2 and the persistent grant on 3", () => {
+  const state = approvalState();
+  const decisions = ["1", "2", "3"].map((char) => {
+    const result = dispatch(state, key("char", { char }), []);
+    assert.equal(result.state.approval, undefined);
+    const effect = result.effects[0];
+    assert.equal(effect?.type, "approve");
+    return effect?.type === "approve" ? effect.decision : undefined;
+  });
+  // `2` has always meant decline; the persistent grant must not inherit it.
+  assert.deepEqual(decisions, ["allow", "deny", "always"]);
+  // A fourth row does not exist, so the key is ignored.
+  assert.deepEqual(dispatch(state, key("char", { char: "4" }), []).effects, []);
+});
+
+test("a card with no rule to learn offers only allow once and decline", () => {
+  const base = approvalState();
+  const approval = base.approval;
+  assert.ok(approval !== undefined);
+  const twoRow = {
+    ...base,
+    approval: { ...approval, options: approval.options.slice(0, 2) },
+  };
+
+  assert.equal(
+    dispatch(twoRow, key("char", { char: "2" }), []).effects[0]?.type === "approve"
+      ? (dispatch(twoRow, key("char", { char: "2" }), []).effects[0] as { decision: string }).decision
+      : "",
+    "deny",
+  );
+  // There is no third row to select or press.
+  assert.deepEqual(dispatch(twoRow, key("char", { char: "3" }), []).effects, []);
+  const down = dispatch(dispatch(twoRow, key("down"), []).state, key("down"), []);
+  assert.equal(down.state.approval?.selected, 1);
+
+  const frame = renderFrame(twoRow, 100, 30);
+  assert.equal(frame.hits.filter((hit) => hit.id.kind === "approve").length, 2);
+  const dump = frame.buffer.dump();
+  assert.ok(dump.includes("2. Decline"));
+  assert.ok(!dump.includes("Always allow"));
+  assert.ok(dump.includes("1/2 choose"));
+});
+
+test("permission card arrows reach the third row and Enter confirms it", () => {
+  let state = approvalState();
+  state = dispatch(state, key("down"), []).state;
+  assert.equal(state.approval?.selected, 1);
+  state = dispatch(state, key("down"), []).state;
+  assert.equal(state.approval?.selected, 2);
+  // The selection clamps at the last row instead of wrapping.
+  state = dispatch(state, key("down"), []).state;
+  assert.equal(state.approval?.selected, 2);
+
+  const confirmed = dispatch(state, key("enter"), []);
+  const effect = confirmed.effects[0];
+  assert.equal(effect?.type === "approve" ? effect.decision : undefined, "always");
+
+  const up = dispatch(dispatch(state, key("up"), []).state, key("enter"), []);
+  assert.equal(up.effects[0]?.type === "approve" ? up.effects[0].decision : undefined, "deny");
+  // Tab cycles through all three rows rather than toggling a pair.
+  const tabbed = dispatch(dispatch(dispatch(approvalState(), key("tab"), []).state, key("tab"), []).state, key("tab"), []);
+  assert.equal(tabbed.state.approval?.selected, 0);
+});
+
+test("permission card mouse rows hit the same three decisions", () => {
+  const state = approvalState();
+  const frame = renderFrame(state, 100, 30);
+  const rows = frame.hits.filter((hit) => hit.id.kind === "approve");
+  assert.equal(rows.length, 3);
+
+  const decisions = rows.map((row) => {
+    const result = dispatch(
+      state,
+      { type: "mouse", kind: "down", button: "left", x: row.rect.x, y: row.rect.y, ctrl: false, alt: false, shift: false },
+      frame.hits,
+    );
+    const effect = result.effects[0];
+    return effect?.type === "approve" ? effect.decision : undefined;
+  });
+  assert.deepEqual(decisions, ["allow", "deny", "always"]);
+
+  const dump = frame.buffer.dump();
+  assert.ok(dump.includes("1. Allow once"));
+  assert.ok(dump.includes("2. Decline"));
+  assert.ok(dump.includes("3. Always allow"));
+  assert.ok(dump.includes("1/2/3 choose"));
+});
+
+test("a ! prompt runs locally instead of reaching the agent", () => {
+  const state = { ...readyState(), ready: true, screen: "agent" as const, prompt: "!git status", cursor: 11 };
+  const result = dispatch(state, key("enter"), []);
+  const effect = result.effects[0];
+  assert.equal(effect?.type, "runShell");
+  assert.equal(effect?.type === "runShell" ? effect.command : "", "git status");
+  assert.equal(result.state.prompt, "");
+  assert.deepEqual(result.state.queued, []);
+  // Nothing was appended to the scrollback by dispatch; the harness owns that entry.
+  assert.deepEqual(result.state.entries, []);
+  assert.deepEqual(result.state.history, ["!git status"]);
+});
+
+test("a ! prompt runs during a turn and never queues behind it", () => {
+  const busy = {
+    ...readyState(),
+    ready: true,
+    screen: "agent" as const,
+    turn: "running" as const,
+    prompt: "!ls -la",
+    cursor: 7,
+  };
+  const result = dispatch(busy, key("enter"), []);
+  assert.equal(result.effects[0]?.type, "runShell");
+  assert.deepEqual(result.state.queued, []);
+  assert.equal(result.state.turn, "running");
+});
+
+test("a bare ! is ordinary text and ! lines suppress both completion menus", () => {
+  const bare = { ...readyState(), ready: true, screen: "agent" as const, prompt: "!", cursor: 1 };
+  assert.equal(dispatch(bare, key("enter"), []).effects[0]?.type, "send");
+
+  const slashLike = typeText({ ...readyState(), ready: true, screen: "agent" as const }, "!/comp");
+  assert.equal(activeCompletion(slashLike), undefined);
+
+  const fileLike = typeText(
+    { ...readyState(), ready: true, screen: "agent" as const, files: ["src/a.ts", "src/b.ts"] },
+    "!cat @src",
+  );
+  assert.equal(activeCompletion(fileLike), undefined);
+  const sent = dispatch(fileLike, key("enter"), []);
+  assert.equal(sent.effects[0]?.type === "runShell" ? sent.effects[0].command : "", "cat @src");
+});
+
+test("/permissions parses its subcommands and emits one effect", () => {
+  const state = { ...readyState(), ready: true, screen: "agent" as const };
+  assert.equal(permissionAction(""), "show");
+  assert.equal(permissionAction("  "), "show");
+  assert.equal(permissionAction("clear"), "clear");
+  assert.equal(permissionAction("safe on"), "safe-on");
+  assert.equal(permissionAction("SAFE OFF"), "safe-off");
+  assert.equal(permissionAction("safe"), undefined);
+  assert.equal(permissionAction("nonsense"), undefined);
+
+  const shown = runSlash(state, "permissions", "");
+  assert.equal(shown.effects[0]?.type === "permissions" ? shown.effects[0].action : "", "show");
+  const cleared = runSlash(state, "rules", "clear");
+  assert.equal(cleared.effects[0]?.type === "permissions" ? cleared.effects[0].action : "", "clear");
+  const off = runSlash(state, "perms", "safe off");
+  assert.equal(off.effects[0]?.type === "permissions" ? off.effects[0].action : "", "safe-off");
+  const bad = runSlash(state, "permissions", "whatever");
+  assert.equal(bad.effects[0]?.type, "toast");
+  assert.equal(findCommand("/perms")?.name, "permissions");
+});
+
+test("shell passthrough helpers pick a login shell and bound their output", () => {
+  assert.equal(loginShell({ SHELL: "/opt/homebrew/bin/fish" }, "darwin"), "/opt/homebrew/bin/fish");
+  assert.equal(loginShell({}, "darwin"), "/bin/zsh");
+  assert.equal(loginShell({}, "linux"), "/bin/bash");
+  assert.equal(stripAnsi("\u001B[31mred\u001B[0m"), "red");
+
+  const capped = capOutput("a".repeat(50_000));
+  assert.ok(capped.length < 21_000);
+  assert.ok(capped.startsWith("a"));
+  assert.ok(capped.endsWith("a"));
+  assert.match(capped, /characters truncated/);
+  assert.equal(capOutput("short"), "short");
+});
+
+test("a ! command that leaves a background child still finishes and kills the group", async () => {
+  const started = Date.now();
+  // The shell exits at once but the backgrounded child holds the pipes open, so
+  // without a process-group kill this never resolves and the entry stays running.
+  const result = await runShellCommand("sleep 31.5 & echo spawned", { timeoutMs: 700 });
+  const elapsed = Date.now() - started;
+
+  assert.ok(elapsed < 10_000, `took ${elapsed}ms`);
+  assert.match(result.output, /spawned/);
+  assert.equal(result.timedOut, true);
+  assert.equal(result.ok, false);
+
+  // The bracket keeps the pattern from matching the lookup's own command line.
+  const survivors = await runShellCommand("pgrep -f 'sleep 31[.]5' || echo none", {
+    timeoutMs: 10_000,
+  });
+  assert.match(survivors.output, /none/);
+});
+
+test("a ! command that exits normally reports its own status", async () => {
+  const ok = await runShellCommand("echo one && echo two", { timeoutMs: 10_000 });
+  assert.equal(ok.ok, true);
+  assert.equal(ok.code, 0);
+  assert.equal(ok.timedOut, false);
+  assert.equal(ok.output, "one\ntwo");
+
+  const failed = await runShellCommand("echo to-stderr >&2; exit 4", { timeoutMs: 10_000 });
+  assert.equal(failed.ok, false);
+  assert.equal(failed.code, 4);
+  assert.match(failed.output, /to-stderr/);
 });
 
 test("screen buffer dumps rows without leaking empty wide-cell placeholders", () => {

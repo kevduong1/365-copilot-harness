@@ -2,7 +2,9 @@
 import { stdin, stdout, stderr } from "node:process";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { ApprovalPolicy } from "./agent/policy.js";
 import { CodingAgent } from "./agent/runner.js";
+import { closeAllJobs } from "./agent/tools.js";
 import {
   SubagentManager,
   createOrchestratorTools,
@@ -22,6 +24,8 @@ interface CliOptions {
   rawChat: boolean;
   cwd: string;
   allowedRoots: string[];
+  /** Auto-approve the built-in read-only command allowlist. */
+  safeAuto: boolean;
 }
 
 function parseArgs(args: string[]): CliOptions {
@@ -34,6 +38,7 @@ function parseArgs(args: string[]): CliOptions {
       rawChat: false,
       cwd: process.cwd(),
       allowedRoots: [],
+      safeAuto: true,
     };
   }
 
@@ -41,6 +46,7 @@ function parseArgs(args: string[]): CliOptions {
   let autoApprove = false;
   let readOnly = false;
   let rawChat = false;
+  let safeAuto = true;
   let cwd = process.cwd();
   const allowedRoots: string[] = [];
   const taskParts: string[] = [];
@@ -51,6 +57,7 @@ function parseArgs(args: string[]): CliOptions {
     else if (arg === "--yes" || arg === "-y") autoApprove = true;
     else if (arg === "--read-only") readOnly = true;
     else if (arg === "--chat") rawChat = true;
+    else if (arg === "--no-safe-auto") safeAuto = false;
     else if (arg === "--cwd" || arg === "--add-dir" || arg === "--allow-dir") {
       const value = args[index + 1];
       if (value === undefined || value.startsWith("-")) throw new Error(`${arg} requires a directory`);
@@ -77,6 +84,7 @@ function parseArgs(args: string[]): CliOptions {
     rawChat,
     cwd,
     allowedRoots,
+    safeAuto,
   };
 }
 
@@ -92,8 +100,9 @@ Options:
   --cwd DIR       Start the coding agent in DIR; DIR becomes an allowed root
   --add-dir DIR   Grant access to an additional root and its descendants (repeatable)
   --allow-dir DIR Alias for --add-dir
-  --read-only     Disable edit, write, and bash
+  --read-only     Disable every mutating tool (edit, patch, write, bash, jobs)
   --yes, -y       Automatically approve mutating tools
+  --no-safe-auto  Also ask before read-only bash commands like ls or git status
   --chat          Use raw browser chat instead of the coding agent
   --print, -p     Run one task non-interactively
   --help, -h      Show this help`);
@@ -203,8 +212,15 @@ function createSubagentManager(
   });
 }
 
-function approvalPrompt(autoApprove: boolean): (call: ToolCall, definition: ToolDefinition) => Promise<boolean> {
-  return async () => autoApprove;
+/**
+ * Print mode has no one to ask, so `--yes` allows everything and otherwise only
+ * the policy's read-only command allowlist gets through.
+ */
+function approvalPrompt(
+  autoApprove: boolean,
+  policy: ApprovalPolicy,
+): (call: ToolCall, definition: ToolDefinition) => Promise<boolean> {
+  return async (call, definition) => autoApprove || policy.decide(call, definition) === "allow";
 }
 
 async function interactive(options: CliOptions): Promise<void> {
@@ -217,6 +233,7 @@ async function interactive(options: CliOptions): Promise<void> {
     rawChat: options.rawChat,
     cwd: options.cwd,
     allowedRoots: options.allowedRoots,
+    safeAuto: options.safeAuto,
   });
 }
 
@@ -235,7 +252,8 @@ async function print(options: CliOptions): Promise<void> {
       stdout.write(`${await client.sendAndWait(task)}\n`);
       return;
     }
-    const confirmTool = approvalPrompt(options.autoApprove);
+    const policy = new ApprovalPolicy({ autoApproveSafeCommands: options.safeAuto });
+    const confirmTool = approvalPrompt(options.autoApprove, policy);
     const manager = createSubagentManager(client, options, confirmTool, stderr);
     const agent = new CodingAgent(client, {
       cwd: options.cwd,
@@ -247,6 +265,7 @@ async function print(options: CliOptions): Promise<void> {
     });
     stdout.write(`${await agent.run(task)}\n`);
   } finally {
+    await closeAllJobs().catch(() => undefined);
     await client.close();
   }
 }

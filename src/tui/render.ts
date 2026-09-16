@@ -525,7 +525,10 @@ function drawShortcuts(state: TuiState, buf: ScreenBuffer, rect: Rect): void {
   const hints: string[] = [];
   if (state.quitArmedUntil > state.now) hints.push("press again to quit");
   else if (state.escArmedUntil > state.now) hints.push("press again to clear");
-  else if (state.approval !== undefined) hints.push("↑/↓ select", "enter approve", "esc park");
+  else if (state.approval !== undefined) {
+    const digits = state.approval.options.map((_option, index) => index + 1).join("/");
+    hints.push("↑/↓ select", `${digits} choose`, "enter confirm", "esc park");
+  }
   else if (state.focus === "scrollback") {
     hints.push("↑/↓ select", "tab prompt", "←/→ fold");
   } else if (state.turn !== "idle" && state.turn !== "starting") {
@@ -601,6 +604,9 @@ function overlayLines(state: TuiState): string[] {
       "Token counts are local estimates; /compact starts a new chat.",
       "Subagents run in extra Chrome tabs; /agents lists them.",
       "Skills in .github/skills or ~/.copilot/skills load on demand; /skills lists them.",
+      "Permission cards answer to 1 allow once, 2 decline, 3 always allow that rule.",
+      "!command runs a local shell command here; nothing is sent to Copilot.",
+      "/permissions lists the always-allow rules learned this session.",
       "",
       ...filterCommands("").map((command) => `/${command.name.padEnd(16)} ${command.description}`),
     ];
@@ -614,6 +620,8 @@ function overlayLines(state: TuiState): string[] {
       "Ctrl+P  or  ?         command palette",
       "Ctrl+X                shortcuts",
       "Ctrl+O                always-approve",
+      "!command              run a local shell command",
+      "/permissions          session permission rules",
       "Shift+Tab             cycle agent / always / chat",
       "Ctrl+G                tasks pane",
       "Ctrl+N                new session",
@@ -667,7 +675,8 @@ function renderApproval(state: TuiState, buf: ScreenBuffer, hits: HitRegion[], c
   const width = Math.min(70, cols - 6);
   const args = JSON.stringify(approval.call.arguments, null, 2);
   const argLines = approval.expanded ? promptLines(args, width - 6) : promptLines(args, width - 6).slice(0, 8);
-  const height = Math.min(16, argLines.length + 8);
+  const options = approval.options;
+  const height = Math.min(14 + options.length, argLines.length + 6 + options.length);
   const rect: Rect = {
     x: Math.max(2, Math.floor((cols - width) / 2)),
     y: Math.max(2, rows - height - 6),
@@ -691,11 +700,10 @@ function renderApproval(state: TuiState, buf: ScreenBuffer, hits: HitRegion[], c
   argLines.forEach((line, row) => {
     buf.text(inner.x + 1, inner.y + 3 + row, truncate(line, inner.w - 2), { fg: theme.grayBright, bg: theme.bgLight });
   });
-  const options = ["Yes, allow", "No, decline"];
-  options.forEach((label, index) => {
-    const y = inner.y + inner.h - 2 + index;
+  options.forEach((option, index) => {
+    const y = inner.y + inner.h - options.length + index;
     const selected = approval.selected === index;
-    const text = `${index + 1}. ${label}`;
+    const text = truncate(`${index + 1}. ${option.label}`, inner.w - 2);
     buf.text(inner.x + 1, y, text, {
       fg: theme.textPrimary,
       bg: selected ? theme.bgVisual : theme.bgLight,

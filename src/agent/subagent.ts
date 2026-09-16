@@ -1,8 +1,8 @@
 import { config } from "../config.js";
 import { Mutex, Semaphore } from "../queue.js";
 import type { TokenUsageEstimate } from "../tokens.js";
-import { CodingAgent } from "./runner.js";
-import { createWorkspaceTools } from "./tools.js";
+import { AgentCancelledError, CodingAgent } from "./runner.js";
+import { createWorkspaceTools, type WorkspaceToolOptions } from "./tools.js";
 import type { AgentBackend, AgentEvent, ConfirmTool, ToolDefinition } from "./types.js";
 
 /** A backend that can also be closed, typically `CopilotClient.newTabSession`. */
@@ -59,11 +59,17 @@ export const SUBAGENT_ROLE_CONTEXT = `<subagent_role>
 You are a subagent working for an orchestrating agent, not for the end user directly. Complete only the delegated task. Your final answer is the report the orchestrator reads, so make it self-contained: lead with the direct answer or outcome, name exact files, paths, and line numbers, and include the key evidence. Do not ask questions back; when something is ambiguous, state the assumption you chose. There is no agent operation for you—never try to delegate further.
 </subagent_role>`;
 
+function cancelledRun(id: number): AgentCancelledError {
+  return new AgentCancelledError(`Subagent #${id} was cancelled before it started`);
+}
+
 interface SubagentEntry {
   record: SubagentRecord;
   agent: CodingAgent | undefined;
   session: SubagentSession | undefined;
   busy: boolean;
+  /** Set by `cancelAll` so a run still queued on the semaphore never opens a tab. */
+  cancelled: boolean;
   lastActivityAt: number;
 }
 
@@ -118,6 +124,7 @@ export class SubagentManager {
       agent: undefined,
       session: undefined,
       busy: true,
+      cancelled: false,
       lastActivityAt: Date.now(),
     };
     this.entries.set(id, entry);
@@ -142,6 +149,20 @@ export class SubagentManager {
     return this.execute(entry, task, false);
   }
 
+  /**
+   * Abort every subagent still running a task. Their conversations stay open,
+   * but nothing further is sent to the browser on their behalf.
+   */
+  cancelAll(reason = "cancelled by the user"): void {
+    for (const entry of this.entries.values()) {
+      if (!entry.busy) continue;
+      // A subagent waiting on the semaphore has no agent to abort yet, so the
+      // flag is what stops it from opening a tab once a permit frees up.
+      entry.cancelled = true;
+      entry.agent?.abort(reason);
+    }
+  }
+
   async close(id: number): Promise<void> {
     const entry = this.entries.get(id);
     if (entry === undefined || entry.busy || !entry.record.sessionOpen) return;
@@ -156,8 +177,13 @@ export class SubagentManager {
 
   private async execute(entry: SubagentEntry, task: string, fresh: boolean): Promise<SubagentRun> {
     const { record } = entry;
+    // Runs synchronously before the first await, so a cancel can only arrive
+    // after this point and will still be seen below.
+    entry.cancelled = false;
     const release = await this.semaphore.acquire();
     try {
+      // Waiting for a permit can outlast the turn that asked for the subagent.
+      if (entry.cancelled) throw cancelledRun(record.id);
       record.status = "running";
       record.steps = 0;
       delete record.endedAt;
@@ -169,6 +195,8 @@ export class SubagentManager {
       }
       const agent = entry.agent;
       if (agent === undefined) throw new Error(`Subagent #${record.id} has no active conversation`);
+      // Opening the tab is another await a cancel can land inside of.
+      if (entry.cancelled) throw cancelledRun(record.id);
       const response = await agent.run(task);
       record.status = "completed";
       record.lastResult = response;
@@ -317,6 +345,10 @@ export async function createOrchestratorTools(
   manager: SubagentManager,
   cwd: string,
   allowedRoots: string[] = [],
+  options: Omit<WorkspaceToolOptions, "allowedRoots"> = {},
 ): Promise<ToolDefinition[]> {
-  return [...(await createWorkspaceTools(cwd, { allowedRoots })), createSubagentTool(manager)];
+  return [
+    ...(await createWorkspaceTools(cwd, { ...options, allowedRoots })),
+    createSubagentTool(manager),
+  ];
 }

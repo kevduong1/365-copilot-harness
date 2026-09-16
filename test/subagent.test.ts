@@ -256,6 +256,104 @@ test("SubagentManager closes a session when agent initialization fails", async (
   assert.deepEqual(lifecycle, ["queued", "started", "failed", "closed"]);
 });
 
+test("SubagentManager cancelAll aborts running subagents", async () => {
+  let releaseFirst!: () => void;
+  const started = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+  class GatedSession implements SubagentSession {
+    readonly prompts: string[] = [];
+    closed = false;
+
+    async newChat(): Promise<void> {}
+
+    async sendAndWait(prompt: string): Promise<string> {
+      this.prompts.push(prompt);
+      releaseFirst();
+      await delay(20);
+      return "Report from a cancelled subagent.";
+    }
+
+    async close(): Promise<void> {
+      this.closed = true;
+    }
+  }
+  const session = new GatedSession();
+  const manager = new SubagentManager({
+    openSession: async () => session,
+    createTools: () => [],
+  });
+
+  const spawned = manager.spawn("Explore forever");
+  await started;
+  manager.cancelAll("test");
+
+  await assert.rejects(spawned, /cancelled/i);
+  // The run stopped at the first reply instead of continuing the loop.
+  assert.equal(session.prompts.length, 1);
+  assert.equal(manager.get(1)?.status, "failed");
+  // Cancelling twice, or with nothing running, is harmless.
+  manager.cancelAll();
+});
+
+test("cancelAll stops a subagent still queued on the semaphore before it opens a tab", async () => {
+  let releaseFirst!: () => void;
+  const firstStarted = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+  class SlowSession implements SubagentSession {
+    closed = false;
+
+    async newChat(): Promise<void> {}
+
+    async sendAndWait(): Promise<string> {
+      releaseFirst();
+      await delay(20);
+      return "First report.";
+    }
+
+    async close(): Promise<void> {
+      this.closed = true;
+    }
+  }
+  let opened = 0;
+  const manager = new SubagentManager({
+    openSession: async () => {
+      opened += 1;
+      return new SlowSession();
+    },
+    createTools: () => [],
+    maxConcurrent: 1,
+  });
+
+  const first = manager.spawn("First task");
+  const second = manager.spawn("Second task");
+  await firstStarted;
+  manager.cancelAll();
+
+  await assert.rejects(first, /cancelled/i);
+  await assert.rejects(second, /cancelled/i);
+  // The queued subagent never opened a browser tab or sent a prompt.
+  assert.equal(opened, 1);
+  assert.equal(manager.get(2)?.status, "failed");
+  assert.equal(manager.get(2)?.sessionOpen, false);
+});
+
+test("a cancelled subagent slot still accepts a later spawn", async () => {
+  const sessions = [new ScriptedSession(["Report."])];
+  let opened = 0;
+  const manager = new SubagentManager({
+    openSession: async () => sessions[opened++]!,
+    createTools: () => [],
+  });
+
+  // Cancelling with nothing running must not poison the next run.
+  manager.cancelAll();
+  const run = await manager.spawn("Explore");
+  assert.equal(run.response, "Report.");
+  assert.equal(opened, 1);
+});
+
 test("SubagentManager lifecycle observer failures do not leak semaphore permits", async () => {
   const sessions = [new ScriptedSession(["First done."]), new ScriptedSession(["Second done."])];
   let opened = 0;

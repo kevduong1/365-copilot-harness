@@ -390,6 +390,71 @@ class FailingCompactionBackend implements AgentBackend {
   }
 }
 
+test("CodingAgent hands every tool the run's abort signal", async () => {
+  const backend = new ScriptedBackend([
+    'HARNESS_REQUEST\n{"operation":"probe","arguments":{}}\nEND_HARNESS_REQUEST',
+    "Done.",
+  ]);
+  const signals: (AbortSignal | undefined)[] = [];
+  const probe: ToolDefinition = {
+    name: "probe",
+    description: "probe",
+    parameters: "none",
+    mutates: false,
+    execute: async (_args, context) => {
+      signals.push(context?.signal);
+      return "probed";
+    },
+  };
+  const agent = new CodingAgent(backend, { tools: [probe] });
+
+  assert.equal(await agent.run("Probe"), "Done.");
+  assert.equal(signals.length, 1);
+  assert.ok(signals[0] instanceof AbortSignal);
+  assert.equal(signals[0]?.aborted, false);
+});
+
+test("CodingAgent abort stops the loop without another browser round trip", async () => {
+  const backend = new ScriptedBackend([
+    'HARNESS_REQUEST\n{"operation":"slow","arguments":{}}\nEND_HARNESS_REQUEST',
+    "This response must never be requested.",
+  ]);
+  let aborted = false;
+  const slow: ToolDefinition = {
+    name: "slow",
+    description: "aborts the run from inside the tool",
+    parameters: "none",
+    mutates: false,
+    execute: async (_args, context) => {
+      agent.abort("test");
+      aborted = context?.signal?.aborted === true;
+      return "partial work";
+    },
+  };
+  const agent = new CodingAgent(backend, { tools: [slow] });
+
+  await assert.rejects(agent.run("Start"), (error: Error) => {
+    assert.equal(error.name, "AgentCancelledError");
+    assert.match(error.message, /cancelled/i);
+    return true;
+  });
+  // The tool saw the signal, and the observation was never sent back.
+  assert.equal(aborted, true);
+  assert.equal(backend.prompts.length, 1);
+  assert.equal(agent.aborted, true);
+});
+
+test("CodingAgent abort before a send stops that run and the next one starts clean", async () => {
+  const backend = new ScriptedBackend(["Second answer."]);
+  const agent = new CodingAgent(backend, { tools: [] });
+
+  // An abort with no run in flight must not poison the next run.
+  agent.abort();
+  assert.equal(await agent.run("First"), "Second answer.");
+  assert.equal(agent.aborted, false);
+  assert.equal(backend.prompts.length, 1);
+});
+
 test("CodingAgent fully reinitializes after an ambiguous compaction failure", async () => {
   const backend = new FailingCompactionBackend();
   const agent = new CodingAgent(backend, { tools: [] });

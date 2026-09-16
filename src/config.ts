@@ -69,6 +69,7 @@ export const config = {
   subagentMaxConcurrent: positiveInteger("SUBAGENT_MAX_CONCURRENT", 2),
   subagentMaxIdleTabs: nonNegativeInteger("SUBAGENT_MAX_IDLE_TABS", 2),
   subagentMaxSteps: positiveInteger("SUBAGENT_MAX_STEPS", 16),
+  toolOutputMaxChars: positiveInteger("TOOL_OUTPUT_MAX_CHARS", 24_000),
   serverPort: port("PORT", 8787),
 } as const;
 

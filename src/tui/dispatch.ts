@@ -9,6 +9,7 @@ import {
 } from "./completion.js";
 import { type InputEvent, type KeyEvent, type MouseEvent } from "./keys.js";
 import {
+  bangCommand,
   deleteBackward,
   deleteForward,
   insertText,
@@ -21,10 +22,12 @@ import { ESC_DOUBLE_MS, MAX_SLASH_VISIBLE, QUIT_CONFIRM_MS } from "./theme.js";
 import {
   callSummary,
   cycleMode,
+  type ApprovalChoice,
   type Effect,
   type HitRegion,
   type NewEntry,
   type OverlayKind,
+  type PermissionAction,
   type ScrollbackEntry,
   type TuiState,
 } from "./types.js";
@@ -64,7 +67,10 @@ function dispatchMouse(state: TuiState, event: MouseEvent, hits: HitRegion[]): D
   }
   if (hit.id.kind === "stop") return cancelTurn(next);
   if (hit.id.kind === "approve") {
-    return resolveApproval({ ...next, approval: next.approval === undefined ? undefined : { ...next.approval, selected: hit.id.option } }, hit.id.option === 0);
+    const approval = next.approval;
+    if (approval === undefined) return { state: next, effects: [] };
+    const option = clampOption(approval.options.length, hit.id.option);
+    return resolveApproval({ ...next, approval: { ...approval, selected: option } }, option);
   }
   if (hit.id.kind === "overlay") {
     return { state: { ...next, overlayIndex: hit.id.index }, effects: [] };
@@ -238,37 +244,40 @@ function cancelTurn(state: TuiState): DispatchResult {
   };
 }
 
+function clampOption(count: number, index: number): number {
+  return Math.max(0, Math.min(Math.max(0, count - 1), index));
+}
+
 function dispatchApproval(state: TuiState, event: KeyEvent): DispatchResult {
   const approval = state.approval;
   if (approval === undefined) return { state, effects: [] };
-  if (event.name === "up" || (event.char === "k" && state.vimMode)) {
-    return { state: { ...state, approval: { ...approval, selected: Math.max(0, approval.selected - 1) } }, effects: [] };
+  const count = approval.options.length;
+  const moveTo = (index: number): DispatchResult => ({
+    state: { ...state, approval: { ...approval, selected: clampOption(count, index) } },
+    effects: [],
+  });
+  if (event.name === "up" || (event.char === "k" && state.vimMode)) return moveTo(approval.selected - 1);
+  if (event.name === "down" || (event.char === "j" && state.vimMode)) return moveTo(approval.selected + 1);
+  if (event.name === "tab") return moveTo(count === 0 ? 0 : (approval.selected + 1) % count);
+  if (event.name === "char" && /^[1-9]$/u.test(event.char)) {
+    const index = Number(event.char) - 1;
+    if (index < count) return resolveApproval(state, index);
   }
-  if (event.name === "down" || (event.char === "j" && state.vimMode)) {
-    return { state: { ...state, approval: { ...approval, selected: Math.min(1, approval.selected + 1) } }, effects: [] };
-  }
-  if (event.name === "tab") {
-    return {
-      state: { ...state, approval: { ...approval, selected: approval.selected === 0 ? 1 : 0 } },
-      effects: [],
-    };
-  }
-  if (event.char === "1") return resolveApproval(state, true);
-  if (event.char === "2") return resolveApproval(state, false);
   if (event.ctrl && event.char === "f") {
     return { state: { ...state, approval: { ...approval, expanded: !approval.expanded } }, effects: [] };
   }
-  if (event.name === "enter") return resolveApproval(state, approval.selected === 0);
+  if (event.name === "enter") return resolveApproval(state, approval.selected);
   if (event.name === "escape") return { state: { ...state, focus: "scrollback" }, effects: [] };
   return { state, effects: [] };
 }
 
-function resolveApproval(state: TuiState, allow: boolean): DispatchResult {
+function resolveApproval(state: TuiState, option: number): DispatchResult {
   const approval = state.approval;
   if (approval === undefined) return { state, effects: [] };
+  const decision: ApprovalChoice = approval.options[option]?.decision ?? "deny";
   return {
     state: { ...state, approval: undefined, focus: "prompt" },
-    effects: [{ type: "approve", id: approval.id, allow }],
+    effects: [{ type: "approve", id: approval.id, decision }],
   };
 }
 
@@ -513,6 +522,8 @@ function submitPrompt(state: TuiState, event: KeyEvent): DispatchResult {
     const next = insertText({ text: state.prompt, cursor: state.cursor }, "\n");
     return { state: syncCompletion({ ...state, prompt: next.text, cursor: next.cursor }), effects: [] };
   }
+  const bang = bangCommand(state.prompt);
+  if (bang !== undefined) return runLocalShell(state, bang);
   state = syncCompletion(state);
   const completion = activeCompletion(state);
   if (completion !== undefined) {
@@ -540,7 +551,30 @@ function submitPrompt(state: TuiState, event: KeyEvent): DispatchResult {
   return enqueueOrSend(state, text);
 }
 
+/**
+ * `!command` runs locally and never reaches Copilot, so it bypasses the send
+ * queue entirely — even mid-turn — while still joining the prompt history.
+ */
+function runLocalShell(state: TuiState, command: string): DispatchResult {
+  const line = state.prompt.trim();
+  return {
+    state: {
+      ...state,
+      screen: "agent",
+      prompt: "",
+      cursor: 0,
+      completion: undefined,
+      history: [...state.history.filter((item) => item !== line), line],
+      historyIndex: -1,
+      scrollOffset: 0,
+    },
+    effects: [{ type: "runShell", command }],
+  };
+}
+
 function sendNow(state: TuiState): DispatchResult {
+  const bang = bangCommand(state.prompt.trim());
+  if (bang !== undefined) return runLocalShell(state, bang);
   const text = state.prompt.trim() || state.queued[0];
   if (text === undefined || text.length === 0) return { state, effects: [] };
   const queued = state.prompt.trim().length > 0 ? state.queued : state.queued.slice(1);
@@ -677,6 +711,13 @@ export function runSlash(state: TuiState, name: string, args: string): DispatchR
       return openOverlay(state, "tasks", [{ type: "refreshAgents" }]);
     case "always-approve":
       return toggleAlways(state);
+    case "permissions": {
+      const action = permissionAction(args);
+      if (action === undefined) {
+        return { state, effects: [{ type: "toast", message: "Usage: /permissions [clear | safe on|off]" }] };
+      }
+      return { state: { ...state, screen: "agent" }, effects: [{ type: "permissions", action }] };
+    }
     case "multiline":
       return { state: { ...state, multiline: !state.multiline }, effects: [] };
     case "vim-mode":
@@ -693,6 +734,19 @@ export function runSlash(state: TuiState, name: string, args: string): DispatchR
     default:
       return { state, effects: [{ type: "toast", message: `Unknown command: /${name}` }] };
   }
+}
+
+/** Parse the `/permissions` arguments; undefined means the usage hint. */
+export function permissionAction(args: string): PermissionAction | undefined {
+  const words = args.trim().toLowerCase().split(/\s+/u).filter(Boolean);
+  if (words.length === 0) return "show";
+  const [head, value] = words;
+  if (head === "clear" || head === "reset") return words.length === 1 ? "clear" : undefined;
+  if (head === "safe") {
+    if (value === "on") return "safe-on";
+    if (value === "off") return "safe-off";
+  }
+  return undefined;
 }
 
 /** The user message sent by `/skill <name> [request]`. */

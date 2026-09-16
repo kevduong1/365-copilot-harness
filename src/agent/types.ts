@@ -23,6 +23,11 @@ export interface ToolResult {
   output: string;
 }
 
+/** Per-call context handed to a tool, currently the cancellation signal for the run. */
+export interface ToolExecutionContext {
+  signal?: AbortSignal;
+}
+
 export interface ToolDefinition {
   name: string;
   description: string;
@@ -38,7 +43,7 @@ export interface ToolDefinition {
    * call in the same response, letting the runner execute them in parallel.
    */
   concurrencySafe?: boolean;
-  execute(arguments_: Record<string, unknown>): Promise<string>;
+  execute(arguments_: Record<string, unknown>, context?: ToolExecutionContext): Promise<string>;
 }
 
 export type AgentEvent =

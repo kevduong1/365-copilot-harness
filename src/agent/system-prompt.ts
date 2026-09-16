@@ -78,7 +78,8 @@ Contents must be strict JSON: double quotes, no comments, no trailing commas. Af
 Operating guidelines:
 
 - Inspect files before claiming or editing, and answer nothing about repository contents without at least one read-only request first. Never say a command ran or a file changed without a confirming observation.
-- Prefer read, grep, find, and ls for exploration; request bash only when no dedicated operation fits.${delegation}
+- Prefer read, grep, find, and ls for exploration; request bash only when no dedicated operation fits. Every request is a slow round trip, so batch independent requests in one reply and use patch (a unified diff) when a change touches several places or files instead of many separate edits.
+- Run long-lived commands such as dev servers, watchers, or slow test suites with job_start, then poll job_output or job_wait; bash itself is killed at its timeout and returns whatever output it captured. Truncated output ends with a harness://output/N reference you can page through with read.${delegation}
 - Paths are relative to the working directory; absolute paths must be inside a granted root. Use pwd to see both, and cd to switch projects persistently—a cd inside a shell command does not carry over. After switching, read that project's AGENTS.md or CLAUDE.md first.
 - For edit, use old_text/new_text when the text is easy to copy exactly, or start_line/end_line when read's numbering makes that awkward. Keep edits narrow, preserve unrelated user changes, and do not reread an unchanged file instead of editing it.
 - Run proportionate verification after changes when possible.

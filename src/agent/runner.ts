@@ -18,6 +18,14 @@ import type {
   ToolResult,
 } from "./types.js";
 
+/** Thrown out of `run()` when `abort()` stopped the step loop. */
+export class AgentCancelledError extends Error {
+  constructor(message = "The agent run was cancelled") {
+    super(message);
+    this.name = "AgentCancelledError";
+  }
+}
+
 export interface AgentRunnerOptions {
   cwd?: string;
   allowedRoots?: string[];
@@ -44,6 +52,8 @@ export class CodingAgent {
   private activeSystemPrompt: string | undefined;
   private initialized = false;
   private newChatPrepared = false;
+  /** Created per `run()`; `abort()` fires it to stop the current run only. */
+  private controller: AbortController | undefined;
   /** Set when a compaction left usage above the threshold, to avoid thrashing. */
   private skipNextCompaction = false;
 
@@ -173,11 +183,24 @@ export class CodingAgent {
     return result;
   }
 
+  /**
+   * Stop the run that is currently in flight. Tools receive the signal, the step
+   * loop exits before the next browser round trip, and the next `run()` starts
+   * from a fresh controller.
+   */
+  abort(reason = "cancelled by the user"): void {
+    this.controller?.abort(new AgentCancelledError(`The agent run was cancelled: ${reason}`));
+  }
+
   async run(task: string): Promise<string> {
     if (task.trim().length === 0) throw new Error("Agent task must not be empty");
+    const controller = new AbortController();
+    this.controller = controller;
+    const { signal } = controller;
     const tools = await this.availableTools();
     let prompt: string;
     let promptCarriesSystemPrompt = false;
+    throwIfAborted(signal);
 
     if (!this.initialized) {
       if (!this.newChatPrepared) await this.backend.newChat();
@@ -195,6 +218,8 @@ export class CodingAgent {
     }
 
     for (let step = 1; step <= this.maxSteps; step += 1) {
+      // Nothing further goes to the browser once the run has been cancelled.
+      throwIfAborted(signal);
       // A prompt that already carries the system prompt opens a fresh chat, so
       // compacting it would only re-send the same bootstrap context. Otherwise a
       // compaction here carries the prompt with it and already holds the reply.
@@ -203,6 +228,7 @@ export class CodingAgent {
         : await this.compactIfNeeded(prompt, step);
       promptCarriesSystemPrompt = false;
       const response = resumed ?? (await this.backend.sendAndWait(prompt));
+      throwIfAborted(signal);
       const parsed = parseToolCalls(response);
 
       if (parsed.calls.length === 0 && parsed.errors.length === 0) {
@@ -232,7 +258,8 @@ export class CodingAgent {
       if (parsed.calls.length > calls.length) {
         parsed.errors.push(`Only the first ${calls.length} tool calls in one response are executed`);
       }
-      const results = await this.executeToolBatch(calls, tools, step);
+      const results = await this.executeToolBatch(calls, tools, step, signal);
+      throwIfAborted(signal);
 
       prompt = formatToolResults(results, parsed.errors);
     }
@@ -269,17 +296,20 @@ export class CodingAgent {
     calls: ToolCall[],
     tools: ToolDefinition[],
     step: number,
+    signal: AbortSignal,
   ): Promise<ToolResult[]> {
     const results = new Array<ToolResult>(calls.length);
     const background = calls.map((call, index) => {
       const definition = tools.find((tool) => tool.name === call.name);
       if (definition?.concurrencySafe !== true) return undefined;
-      return this.executeTool(call, tools, step).then((result) => {
+      return this.executeTool(call, tools, step, signal).then((result) => {
         results[index] = result;
       });
     });
     for (const [index, call] of calls.entries()) {
-      if (background[index] === undefined) results[index] = await this.executeTool(call, tools, step);
+      if (background[index] === undefined) {
+        results[index] = await this.executeTool(call, tools, step, signal);
+      }
     }
     await Promise.all(background.filter((pending) => pending !== undefined));
     return results;
@@ -289,6 +319,7 @@ export class CodingAgent {
     call: ToolCall,
     tools: ToolDefinition[],
     step: number,
+    signal: AbortSignal,
   ): Promise<ToolResult> {
     await this.emit({ type: "tool_start", call, step });
     const definition = tools.find((tool) => tool.name === call.name);
@@ -304,7 +335,7 @@ export class CodingAgent {
       result = { call, ok: false, output: `User declined ${call.name}` };
     } else {
       try {
-        result = { call, ok: true, output: await definition.execute(call.arguments) };
+        result = { call, ok: true, output: await definition.execute(call.arguments, { signal }) };
       } catch (error) {
         result = {
           call,
@@ -338,9 +369,20 @@ export class CodingAgent {
     return (await this.compact(true, step, nextPrompt)).response;
   }
 
+  /** True while a `run()` is in flight and has not been aborted. */
+  get aborted(): boolean {
+    return this.controller?.signal.aborted ?? false;
+  }
+
   private looksLikeToolRefusal(response: string): boolean {
     return /(?:do not|don't|cannot|can't|unable to|no) (?:have )?(?:access|tools?)|not available|does not exist here|execution environment/i.test(
       response,
     );
   }
+}
+
+function throwIfAborted(signal: AbortSignal): void {
+  if (!signal.aborted) return;
+  const { reason } = signal;
+  throw reason instanceof Error ? reason : new AgentCancelledError();
 }

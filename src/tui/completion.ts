@@ -36,6 +36,8 @@ interface CompletionCandidate {
 }
 
 function candidate(state: TuiState): CompletionCandidate | undefined {
+  // A `!` line is a local shell command; neither menu belongs over it.
+  if (state.prompt.startsWith("!")) return undefined;
   const slash = slashToken(state.prompt);
   if (slash !== undefined && !state.prompt.includes(" ")) {
     return {
